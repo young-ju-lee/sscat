@@ -11,7 +11,8 @@ const emit = defineEmits(["toggle-pin", "hover", "navigate"]);
 
 const items = [
   { id: "spec", label: "스펙 계산", icon: "calc" },
-  { id: "team", label: "4 vs 4 팀 구성", icon: "team" },
+  { id: "team", label: "4대4 챌린지", icon: "team" },
+  { id: "refs", label: "참고 사이트", icon: "link" },
 ];
 </script>
 
@@ -59,10 +60,14 @@ const items = [
           <rect x="5" y="3" width="14" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.6" />
           <path d="M8 8h8M8 12h8M8 16h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
         </svg>
-        <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+        <svg v-else-if="item.icon === 'team'" viewBox="0 0 24 24" aria-hidden="true">
           <circle cx="7" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.6" />
           <circle cx="17" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.6" />
           <path d="M4 18c.4-2.4 2-3.5 3.8-3.5S11.2 15.6 11.6 18M12.4 18c.4-2.4 2-3.5 3.8-3.5S19.6 15.6 20 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          <path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
         </svg>
         <span v-show="expanded">{{ item.label }}</span>
       </button>

@@ -9,9 +9,19 @@ for (const list of Object.values(skillTiers)) {
 
 const ELEMENTS = ["Water", "Fire", "Wind", "Light", "Dark", "Physical"];
 
-export function recommendForClass(rows, profile, line) {
-  const pveCards = rows.map((row) => prepare(row, profile, true)).filter(Boolean);
-  const pvpCards = rows.map((row) => prepare(row, profile, false)).filter(Boolean);
+export function techniqueTarget(skill) {
+  return targetMode(NOTES.get(skill?.id) || "", skill?.kind || "Technique");
+}
+
+export function recommendForClass(rows, profile, line, chain = [], arenas = ["pve", "pvp"]) {
+  const depthOf = depthMap(chain);
+  const want = new Set(arenas);
+  const pveCards = want.has("pve")
+    ? rows.map((row) => tagDepth(prepare(row, profile, true), row, depthOf)).filter(Boolean)
+    : [];
+  const pvpCards = want.has("pvp")
+    ? rows.map((row) => tagDepth(prepare(row, profile, false), row, depthOf)).filter(Boolean)
+    : [];
   return {
     pve: [
       pack("single", "단일", recommendMode(pveCards, line, "single"), true),
@@ -37,14 +47,16 @@ function recommendMode(cards, line, mode) {
   const charmPool = charmPoolOf(charms, techPool);
   const best = searchLine(line, techPool, charmPool) || search(techPool, charmPool);
   if (!best) return { techniques: [], charms: [], healing: [], total: 0 };
-  const pack = bonuses(best.techSet, best.charmSet);
-  const rankedTech = castOrder(best.techSet, best.parts);
-  const rankedCharm = [...best.charmSet].sort((a, b) => charmRank(b, best, pack) - charmRank(a, best, pack));
+  const techSet = fillCards(best.techSet, cards.filter((card) => card.kind === "Technique"), modeMatch(mode));
+  const charmSet = fillCards(best.charmSet, cards.filter((card) => card.kind === "Charm"));
+  const pack = bonuses(techSet, charmSet);
+  const rankedTech = castOrder(techSet, best.parts);
+  const rankedCharm = [...charmSet].sort((a, b) => charmRank(b, { ...best, techSet }, pack) - charmRank(a, { ...best, techSet }, pack));
   return {
     techniques: rankedTech.map((card) => card.row),
     charms: rankedCharm.map((card) => card.row),
     healing: [],
-    total: best.total,
+    total: scoreSet(techSet, charmSet).total,
   };
 }
 
@@ -74,14 +86,16 @@ function recommendRole(cards, line, role) {
     },
   );
   if (!best) return { techniques: [], charms: [], healing: [], total: 0 };
-  const bonusPack = bonuses(best.techSet, best.charmSet);
-  const rankedTech = castOrder(best.techSet, best.parts);
-  const rankedCharm = [...best.charmSet].sort((a, b) => charmRank(b, best, bonusPack) - charmRank(a, best, bonusPack));
+  const techSet = fillCards(best.techSet, techs, signature);
+  const charmSet = fillCards(best.charmSet, charms, signature);
+  const bonusPack = bonuses(techSet, charmSet);
+  const rankedTech = castOrder(techSet, best.parts);
+  const rankedCharm = [...charmSet].sort((a, b) => charmRank(b, { ...best, techSet }, bonusPack) - charmRank(a, { ...best, techSet }, bonusPack));
   return {
     techniques: rankedTech.map((card) => card.row),
     charms: rankedCharm.map((card) => card.row),
     healing: [],
-    total: scoreSet(best.techSet, best.charmSet).total,
+    total: scoreSet(techSet, charmSet).total,
   };
 }
 
@@ -101,6 +115,39 @@ function identityValue(card) {
     + (card.lifesteal ? 2 : 0)
     + (card.shield ? 2 : 0)
     + (card.defBuff ? 2 : 0);
+}
+
+function depthMap(chain) {
+  const current = Math.max(0, chain.length - 1);
+  return new Map(chain.map((id, index) => [id, current - index]));
+}
+
+function tagDepth(card, row, depthOf) {
+  if (!card) return null;
+  card.depth = depthOf.get(row.skill.classId) || 0;
+  return card;
+}
+
+function modeMatch(mode) {
+  return (card) => mode === "any" || card.target === "either" || card.target === mode;
+}
+
+function fillCards(chosen, pool, prefer) {
+  if (chosen.length >= 4) return chosen;
+  const used = new Set(chosen.map((card) => card.id));
+  const prior = pool
+    .filter((card) => card.depth > 0 && !used.has(card.id))
+    .sort((a, b) => a.depth - b.depth || turnValue(b) - turnValue(a) || (b.base || 0) - (a.base || 0));
+  const next = [...chosen];
+  for (const ok of prefer ? [prefer, () => true] : [() => true]) {
+    for (const card of prior) {
+      if (next.length >= 4) return next;
+      if (used.has(card.id) || !ok(card)) continue;
+      next.push(card);
+      used.add(card.id);
+    }
+  }
+  return next;
 }
 
 function capPool(primary, extra, limit) {

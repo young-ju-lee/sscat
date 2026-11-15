@@ -1,7 +1,13 @@
 import wiki from "../data/wikiSkills.json" with { type: "json" };
+import skillTiers from "../data/skillTiers.json" with { type: "json" };
 import { a as model, r as resolveHit } from "./damageFormula.js";
 import { characterRanks, SKILL_NAMES } from "../data/skillNames.js";
 import { fmtSkill, readSkill } from "./skillValue.js";
+
+const NOTES = new Map();
+for (const list of Object.values(skillTiers)) {
+  for (const skill of list) NOTES.set(skill.id, skill.description || "");
+}
 
 export const REALMS = characterRanks();
 
@@ -33,8 +39,9 @@ function skillName(name) {
 
 export function evaluateSkill(skill, rank, level, realm, profile, pve) {
   const { attacks, heals, lines } = readSkill(skill, rank, level, realm);
+  const source = fighterSource(profile, skill, pve);
 
-  const attacker = toFighter(profile, "self");
+  const attacker = toFighter(source, "self");
   const defender = toFighter(profile.target, "target");
   const hits = attacks.map((hit) => {
     const result = resolveHit(model, attacker, defender, { coef: hit.ratio, fixed: hit.flat }, pve);
@@ -43,7 +50,7 @@ export function evaluateSkill(skill, rank, level, realm, profile, pve) {
   const expected = hits.reduce((sum, hit) => sum + hit.expected, 0);
   const normal = hits.reduce((sum, hit) => sum + hit.normal, 0);
   const crit = hits.reduce((sum, hit) => sum + hit.crit, 0);
-  const heal = heals.reduce((sum, hit) => sum + healAmount(hit, profile), 0);
+  const heal = scaleHeal(heals.reduce((sum, hit) => sum + healAmount(hit, profile), 0), profile);
 
   return {
     skill,
@@ -116,6 +123,37 @@ function formatCard(attacks, heals) {
     ...heals.map((hit) => `치유 ${fmtSkill(hit.coef, true)} + ${fmtSkill(hit.flat, false)}`),
   ];
   return parts.join(" / ");
+}
+
+function elementNames(skill) {
+  const text = NOTES.get(skill.id) || skill.description || "";
+  const found = new Set();
+  for (const match of text.matchAll(/\b(Water|Fire|Wind|Light|Dark|Physical)\s+(?:Doom\s+)?DMG/gi)) {
+    found.add(match[1].toLowerCase());
+  }
+  return [...found];
+}
+
+function fighterSource(profile, skill, pve) {
+  if (!profile?.detailStats) return profile;
+  const names = elementNames(skill);
+  const elemental = names.filter((name) => name !== "physical");
+  const next = { ...profile };
+  if (elemental.length) {
+    next.elemAffinity = Math.max(...elemental.map((name) =>
+      (Number(profile.elem?.[name]) || 0) + (Number(profile.bless?.[name]) || 0)
+    ));
+  } else if (names.includes("physical")) {
+    next.mastery = Number(profile.physMastery) || 0;
+    next.elemAffinity = 0;
+  }
+  if (pve) next.dmgBonus = (Number(profile.dmgBonus) || 0) + (Number(profile.monsterDmg) || 0);
+  return next;
+}
+
+function scaleHeal(heal, profile) {
+  if (!profile?.detailStats || !heal) return heal;
+  return Math.round(heal * (1 + (Number(profile.healBonus) || 0) / 100));
 }
 
 function toFighter(src, side) {

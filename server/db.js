@@ -40,6 +40,11 @@ export function mapDbError(err) {
     error.status = 503;
     throw error;
   }
+  if (err.code === "42703") {
+    const error = new Error("명단 테이블을 갱신해야 합니다. sql/auth.sql을 다시 실행해 주세요.");
+    error.status = 503;
+    throw error;
+  }
   if (err.code === "42883") {
     const error = new Error("pgcrypto 확장이 없습니다. sql/auth.sql을 다시 실행해 주세요.");
     error.status = 503;

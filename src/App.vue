@@ -3,10 +3,13 @@ import { computed, onMounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import SpecCalc from "./views/SpecCalc.vue";
 import TeamComp from "./views/TeamComp.vue";
+import References from "./views/References.vue";
 import Login from "./views/Login.vue";
+import Door from "./views/Door.vue";
 import { account, loadProfiles, restoreSession, signOut } from "./lib/session.js";
 import { adoptProfiles } from "./composables/useProfile.js";
 
+const passedDoor = ref(sessionStorage.getItem("sxs-door") === "1");
 const pinned = ref(localStorage.getItem("sxs-pin") !== "0");
 const hover = ref(false);
 const page = ref(localStorage.getItem("sxs-page") || "spec");
@@ -30,6 +33,11 @@ async function onAuth() {
   page.value = "login";
 }
 
+function openDoor() {
+  sessionStorage.setItem("sxs-door", "1");
+  passedDoor.value = true;
+}
+
 async function onLogin() {
   page.value = "spec";
   adoptProfiles(await loadProfiles());
@@ -37,7 +45,8 @@ async function onLogin() {
 </script>
 
 <template>
-  <div class="shell">
+  <Door v-if="!passedDoor" @open="openDoor" />
+  <div v-else class="shell">
     <Sidebar
       :pinned="pinned"
       :expanded="expanded"
@@ -52,7 +61,8 @@ async function onLogin() {
     <main class="main">
       <SpecCalc v-if="page === 'spec'" />
       <TeamComp v-else-if="page === 'team'" />
-      <Login v-else @success="onLogin" />
+      <References v-else-if="page === 'refs'" />
+      <Login v-else-if="page === 'login'" @success="onLogin" />
     </main>
   </div>
 </template>

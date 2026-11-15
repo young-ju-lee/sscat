@@ -17,7 +17,10 @@ const popupPos = ref({ top: 12, left: 12 });
 const dragging = ref(null);
 const overSlot = ref("");
 const detailTab = ref("recommend");
-const includePrior = ref(false);
+const pveDetail = ref(false);
+const pvpDetail = ref(false);
+const swap = ref(null);
+const pickerPrior = ref(false);
 const draftRank = ref(profile.value.rank);
 const draftLevel = ref(profile.value.skillLevel);
 let popupAnchor = null;
@@ -37,21 +40,55 @@ const rows = computed(() => {
     });
 });
 
-const recommendRows = computed(() => {
-  const current = profile.value;
-  const chain = findClass(current.classId).chain;
+const EXTRA_KEYS = [
+  "critRate", "critRating", "critDmg", "critResist", "block", "blockDmgResist",
+  "accuracy", "dmgBonus", "dmgResist", "healBonus", "monsterDmg", "monsterResist",
+  "effectHit", "effectResist", "mastery", "elemResist", "physMastery", "physResist",
+  "flatDmgAdd", "blockIgnore", "blockIgnoreRating", "critPowerFlat", "elemAffinity",
+];
+
+function recommendProfile(source, detail, arena) {
+  const next = {
+    ...source,
+    pve: arena,
+    elem: { ...source.elem },
+    bless: { ...source.bless },
+    target: source.target,
+    detailStats: Boolean(detail),
+  };
+  if (!detail) {
+    for (const key of EXTRA_KEYS) next[key] = 0;
+    next.elem = { wind: 0, water: 0, fire: 0, light: 0, dark: 0 };
+    next.bless = { wind: 0, water: 0, fire: 0, light: 0, dark: 0 };
+  }
+  return next;
+}
+
+function evaluateChain(shaped) {
+  const chain = findClass(shaped.classId).chain;
   return chain.flatMap((classId) =>
     skillsForClass(classId).map((skill) =>
-      evaluateSkill(skill, current.rank, current.skillLevel, current.realm, current, current.pve)
+      evaluateSkill(skill, shaped.rank, shaped.skillLevel, shaped.realm, shaped, shaped.pve)
     )
   );
-});
+}
 
-const best = computed(() => recommendForClass(recommendRows.value, profile.value, findClass(profile.value.classId).line));
+const catalogRows = computed(() => evaluateChain(profile.value));
+const pveProfile = computed(() => recommendProfile(profile.value, pveDetail.value, true));
+const pvpProfile = computed(() => recommendProfile(profile.value, pvpDetail.value, false));
+const pveRows = computed(() => evaluateChain(pveProfile.value));
+const pvpRows = computed(() => evaluateChain(pvpProfile.value));
+
+const best = computed(() => {
+  const klass = findClass(profile.value.classId);
+  const pve = recommendForClass(pveRows.value, pveProfile.value, klass.line, klass.chain, ["pve"]);
+  const pvp = recommendForClass(pvpRows.value, pvpProfile.value, klass.line, klass.chain, ["pvp"]);
+  return { pve: pve.pve, pvp: pvp.pvp };
+});
 const selected = computed(() => {
   if (!popupId.value) return null;
   return rows.value.find((row) => row.skill.id === popupId.value)
-    || recommendRows.value.find((row) => row.skill.id === popupId.value)
+    || catalogRows.value.find((row) => row.skill.id === popupId.value)
     || null;
 });
 const realmLabel = computed(() => REALMS.find((row) => row.id === profile.value.realm)?.label || "");
@@ -78,6 +115,11 @@ const groups = computed(() => {
 watch(() => profile.value.id, () => {
   draftRank.value = profile.value.rank;
   draftLevel.value = profile.value.skillLevel;
+  swap.value = null;
+});
+
+watch(() => profile.value.classId, () => {
+  swap.value = null;
 });
 
 function savedIds(mode, kind) {
@@ -87,43 +129,63 @@ function savedIds(mode, kind) {
   return Array.isArray(scoped) ? scoped.slice(0, 4) : [];
 }
 
-function buildSlots(mode, kind, recommended) {
+function buildSlots(mode, kind, recommended, sourceRows) {
   const overrides = savedIds(mode, kind);
-  const pinnedIds = new Set(
-    overrides.filter((id) => recommendRows.value.some((row) => row.skill.id === id && row.skill.kind === kind))
-  );
+  const pool = sourceRows?.length ? sourceRows : recommended;
+  const findRow = (id) => pool.find((row) => row.skill.id === id && row.skill.kind === kind)
+    || catalogRows.value.find((row) => row.skill.id === id && row.skill.kind === kind)
+    || null;
+  const pinnedIds = new Set(overrides.filter((id) => findRow(id)));
   const free = recommended.filter((row) => !pinnedIds.has(row.skill.id));
   let cursor = 0;
   return Array.from({ length: 4 }, (_, index) => {
     const id = overrides[index];
-    const pinned = id
-      ? recommendRows.value.find((row) => row.skill.id === id && row.skill.kind === kind) || null
-      : null;
+    const pinned = id ? findRow(id) : null;
     const row = pinned || free[cursor++] || null;
     return { key: `${mode}-${kind}-${index}`, mode, kind, index, row, pinned: Boolean(pinned) };
   });
 }
 
 const recommendGroups = computed(() => [
-  ["PVE", best.value.pve],
-  ["PVP", best.value.pvp],
-].map(([title, rows]) => ({
+  ["PVE", best.value.pve, pveProfile.value],
+  ["PVP", best.value.pvp, pvpProfile.value],
+].map(([title, rows, shaped]) => ({
   title,
   sets: (rows || []).map((picked) => {
-    const techniques = buildSlots(picked.id, "Technique", picked.techniques || []);
-    const charms = buildSlots(picked.id, "Charm", picked.charms || []);
+    const source = picked.arena === false ? pvpRows.value : pveRows.value;
+    const techniques = buildSlots(picked.id, "Technique", picked.techniques || [], source);
+    const charms = buildSlots(picked.id, "Charm", picked.charms || [], source);
     const pinned = [...techniques, ...charms].some((slot) => slot.pinned);
     const base = picked.total || 0;
     const shown = pinned
-      ? scoreCombo(profile.value, techniques.map((slot) => slot.row), charms.map((slot) => slot.row), picked.arena)
+      ? scoreCombo(shaped, techniques.map((slot) => slot.row), charms.map((slot) => slot.row), picked.arena)
       : base;
-    return { id: picked.id, label: picked.label, techniques, charms, pinned, shown, delta: shown - base };
+    return { id: picked.id, label: picked.label, arena: picked.arena, techniques, charms, pinned, shown, delta: shown - base };
   }),
 })));
 
+const pickerSkills = computed(() => {
+  const slot = swap.value;
+  if (!slot) return [];
+  const set = recommendGroups.value.flatMap((group) => group.sets).find((item) => item.id === slot.mode);
+  if (!set) return [];
+  const placed = slot.kind === "Technique" ? set.techniques : set.charms;
+  const used = new Set(placed.map((item) => item.row?.skill.id).filter(Boolean));
+  const chain = findClass(profile.value.classId).chain;
+  const classIds = pickerPrior.value ? chain : chain.slice(-1);
+  const tierIds = new Set();
+  for (const classId of classIds) {
+    for (const skill of skillTiers[classId] || []) tierIds.add(skill.id);
+  }
+  const source = set.arena === false ? pvpRows.value : pveRows.value;
+  return source
+    .filter((row) => classIds.includes(row.skill.classId) && tierIds.has(row.skill.id) && row.skill.kind === slot.kind && !used.has(row.skill.id))
+    .sort((a, b) => (b.expected - a.expected) || (b.heal - a.heal));
+});
+
 const tierGroups = computed(() => {
   const chain = findClass(profile.value.classId).chain;
-  const classIds = includePrior.value ? chain : chain.slice(-1);
+  const classIds = chain.slice(-1);
   const owned = new Map();
   const meta = [];
   const seen = new Set();
@@ -273,11 +335,42 @@ function onScroll() {
 onMounted(() => window.addEventListener("scroll", onScroll, true));
 onBeforeUnmount(() => window.removeEventListener("scroll", onScroll, true));
 
-function startDrag(skill, event) {
+function openSwap(slot) {
+  if (dragged || !slot.row) return;
+  const current = swap.value;
+  if (current && current.mode === slot.mode && current.kind === slot.kind && current.index === slot.index) {
+    swap.value = null;
+    return;
+  }
+  pickerPrior.value = false;
+  swap.value = { mode: slot.mode, kind: slot.kind, index: slot.index };
+}
+
+function chooseSwap(row) {
+  const slot = swap.value;
+  if (!slot) return;
+  const kind = row.skill.kind;
+  const set = recommendGroups.value.flatMap((group) => group.sets).find((item) => item.id === slot.mode);
+  const slots = kind === "Technique" ? set?.techniques || [] : set?.charms || [];
+  const list = slots.map((item) => item.row?.skill.id ?? null);
+  list[slot.index] = row.skill.id;
+  writeKind(slot.mode, kind, list);
+  swap.value = null;
+}
+
+function startReorder(slot, event) {
+  if (slot.kind !== "Technique" || !slot.row) {
+    event.preventDefault();
+    return;
+  }
   dragged = true;
-  dragging.value = { id: skill.id, kind: skill.kind };
-  event.dataTransfer.effectAllowed = "copy";
-  event.dataTransfer.setData("text/plain", String(skill.id));
+  dragging.value = {
+    id: slot.row.skill.id,
+    mode: slot.mode,
+    index: slot.index,
+  };
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", String(slot.row.skill.id));
 }
 
 function endDrag() {
@@ -288,10 +381,11 @@ function endDrag() {
   }, 0);
 }
 
-function allowDrop(slot, event) {
-  if (!dragging.value || dragging.value.kind !== slot.kind) return;
+function allowReorder(slot, event) {
+  const drag = dragging.value;
+  if (!drag || slot.kind !== "Technique" || drag.mode !== slot.mode) return;
   event.preventDefault();
-  event.dataTransfer.dropEffect = "copy";
+  event.dataTransfer.dropEffect = "move";
   overSlot.value = slot.key;
 }
 
@@ -300,29 +394,25 @@ function leaveDrop(slot, event) {
   if (overSlot.value === slot.key) overSlot.value = "";
 }
 
-function dropSkill(slot, event) {
+function dropReorder(slot, event) {
   event.preventDefault();
-  const id = dragging.value?.id || Number(event.dataTransfer.getData("text/plain"));
-  const row = recommendRows.value.find((item) => item.skill.id === id);
+  const drag = dragging.value;
   overSlot.value = "";
   dragging.value = null;
-  if (!row || row.skill.kind !== slot.kind) return;
-  const key = slot.kind === "Technique" ? "techniques" : "charms";
+  if (!drag || slot.kind !== "Technique" || drag.mode !== slot.mode || drag.index === slot.index) return;
   const set = recommendGroups.value.flatMap((group) => group.sets).find((item) => item.id === slot.mode);
-  const slots = slot.kind === "Technique" ? set?.techniques || [] : set?.charms || [];
-  const list = slots.map((item) => item.row?.skill.id ?? null);
-  const from = list.indexOf(id);
-  if (from === slot.index) return;
-  if (from >= 0) {
-    const displaced = list[slot.index];
-    list[slot.index] = id;
-    list[from] = displaced;
-  } else {
-    list[slot.index] = id;
-  }
+  const list = (set?.techniques || []).map((item) => item.row?.skill.id ?? null);
+  const displaced = list[slot.index];
+  list[slot.index] = drag.id;
+  list[drag.index] = displaced;
+  writeKind(slot.mode, "Technique", list);
+}
+
+function writeKind(mode, kind, list) {
+  const key = kind === "Technique" ? "techniques" : "charms";
   const classId = profile.value.classId;
   const current = splitLoadout(profile.value.loadouts?.[classId]);
-  current[slot.mode] = { ...(current[slot.mode] || {}), [key]: list };
+  current[mode] = { ...(current[mode] || {}), [key]: list };
   storeLoadout(classId, current);
 }
 
@@ -348,7 +438,7 @@ function storeLoadout(classId, current) {
     if (empty) delete current[mode];
   }
   const loadouts = { ...(profile.value.loadouts || {}) };
-  if (!current.single && !current.aoe) delete loadouts[classId];
+  if (!Object.keys(current).length) delete loadouts[classId];
   else loadouts[classId] = current;
   profile.value.loadouts = loadouts;
 }
@@ -468,6 +558,12 @@ async function dropProfile(id) {
           <option v-for="branch in branches" :key="branch.id" :value="branch.id">{{ branch.name }}</option>
         </select>
       </label>
+      <label class="field">
+        <span>차수</span>
+        <select :value="profile.classTier" aria-label="전직 차수" @change="setTier($event.target.value)">
+          <option v-for="tier in tiers" :key="tier.id" :value="tier.id">{{ tier.label }}</option>
+        </select>
+      </label>
       <label class="field"><span>레벨</span><input v-model.number="profile.level" type="number" min="1" max="200" /></label>
       <p class="stat-group">주요 속성</p>
       <label class="field"><span>공격</span><input v-model.number="profile.atk" type="number" min="0" /></label>
@@ -513,35 +609,40 @@ async function dropProfile(id) {
           <button type="button" role="tab" :class="{ on: detailTab === 'recommend' }" :aria-selected="detailTab === 'recommend'" @click="detailTab = 'recommend'">추천 스킬</button>
           <button type="button" role="tab" :class="{ on: detailTab === 'skills' }" :aria-selected="detailTab === 'skills'" @click="detailTab = 'skills'">스킬 상세 정보</button>
         </div>
-        <label class="tier-pick">
-          <span>차수</span>
-          <select :value="profile.classTier" aria-label="전직 차수" @change="setTier($event.target.value)">
-            <option v-for="tier in tiers" :key="tier.id" :value="tier.id">{{ tier.label }}</option>
-          </select>
-        </label>
       </div>
       <div class="quality-row">
-        <span>전체 등급</span>
-        <button
-          v-for="quality in QUALITIES"
-          :key="quality.id"
-          type="button"
-          class="qbtn"
-          :class="{ on: draftRank === quality.rank }"
-          @click="draftRank = quality.rank"
-        >
-          {{ quality.name }}
-        </button>
-        <label class="level-pick">
-          <span>스킬 레벨</span>
-          <input v-model.number="draftLevel" type="number" min="1" max="200" aria-label="스킬 레벨" />
-        </label>
-        <button type="button" class="apply-all" @click="applyAll">일괄적용</button>
+        <div class="quality-main">
+          <span>전체 등급</span>
+          <button
+            v-for="quality in QUALITIES"
+            :key="quality.id"
+            type="button"
+            class="qbtn"
+            :class="{ on: draftRank === quality.rank }"
+            @click="draftRank = quality.rank"
+          >
+            {{ quality.name }}
+          </button>
+          <div class="level-apply">
+            <label class="level-pick">
+              <span>스킬 레벨</span>
+              <input v-model.number="draftLevel" type="number" min="1" max="200" aria-label="스킬 레벨" />
+            </label>
+            <button type="button" class="apply-all" @click="applyAll">일괄 적용</button>
+          </div>
+        </div>
       </div>
       <p class="skill-note">고정 수치는 스킬 레벨과 왼쪽 랭크가 함께 정하고, 계수(%)는 등급만 따라갑니다. 일괄적용을 눌러야 추천에 반영됩니다.</p>
       <template v-if="detailTab === 'recommend'">
-      <section v-for="group in recommendGroups" :key="group.title" class="recommend-group">
-      <h3 class="play-title">{{ group.title }}</h3>
+      <section v-for="group in recommendGroups" :key="group.title" class="recommend-group" :class="{ lead: group.title === 'PVE' }">
+      <div class="play-head">
+        <h3 class="play-title">{{ group.title }}</h3>
+        <label class="prior-toggle">
+          <input v-if="group.title === 'PVE'" v-model="pveDetail" type="checkbox" />
+          <input v-else v-model="pvpDetail" type="checkbox" />
+          기타 + 세부 속성 포함
+        </label>
+      </div>
       <section v-for="set in group.sets" :key="set.id" class="recommend-set">
         <div class="recommend-bar">
           <span class="mode-label">{{ set.label }}</span>
@@ -555,17 +656,20 @@ async function dropProfile(id) {
               v-for="slot in set.techniques"
               :key="slot.key"
               class="recommend-slot"
-              :class="{ over: overSlot === slot.key }"
-              @dragover="allowDrop(slot, $event)"
+              :class="{ over: overSlot === slot.key, picking: swap && swap.mode === slot.mode && swap.kind === slot.kind && swap.index === slot.index }"
+              @dragover="allowReorder(slot, $event)"
               @dragleave="leaveDrop(slot, $event)"
-              @drop="dropSkill(slot, $event)"
+              @drop="dropReorder(slot, $event)"
             >
               <button
                 v-if="slot.row"
                 type="button"
                 class="recommend-icon"
+                draggable="true"
                 :title="slot.row.skill.name"
-                @click="openSkill(slot.row.skill.id, $event)"
+                @click="openSwap(slot)"
+                @dragstart="startReorder(slot, $event)"
+                @dragend="endDrag"
               >
                 <img :src="slot.row.skill.icon" :alt="slot.row.skill.name" width="52" height="52" draggable="false" />
               </button>
@@ -575,17 +679,14 @@ async function dropProfile(id) {
               v-for="slot in set.charms"
               :key="slot.key"
               class="recommend-slot"
-              :class="{ split: slot.index === 0, over: overSlot === slot.key }"
-              @dragover="allowDrop(slot, $event)"
-              @dragleave="leaveDrop(slot, $event)"
-              @drop="dropSkill(slot, $event)"
+              :class="{ split: slot.index === 0, picking: swap && swap.mode === slot.mode && swap.kind === slot.kind && swap.index === slot.index }"
             >
               <button
                 v-if="slot.row"
                 type="button"
                 class="recommend-icon"
                 :title="slot.row.skill.name"
-                @click="openSkill(slot.row.skill.id, $event)"
+                @click="openSwap(slot)"
               >
                 <img :src="slot.row.skill.icon" :alt="slot.row.skill.name" width="52" height="52" draggable="false" />
               </button>
@@ -594,15 +695,32 @@ async function dropProfile(id) {
           </div>
           <button v-if="set.pinned" type="button" class="reset-loadout" @click="resetLoadout(set.id)">되돌리기</button>
         </div>
+        <div v-if="swap && swap.mode === set.id" class="swap-panel" @click.stop>
+          <div class="swap-head">
+            <label class="prior-toggle">
+              <input v-model="pickerPrior" type="checkbox" />
+              이전 스킬 포함
+            </label>
+          </div>
+          <p v-if="!pickerSkills.length" class="skill-note swap-empty">{{ swap.kind === "Technique" ? "바꿀 기술이 없습니다." : "바꿀 특성이 없습니다." }}</p>
+          <div v-else class="swap-grid">
+            <button
+              v-for="row in pickerSkills"
+              :key="row.skill.id"
+              type="button"
+              class="recommend-icon"
+              :title="row.skill.name"
+              @click="chooseSwap(row)"
+            >
+              <img :src="row.skill.icon" :alt="row.skill.name" width="52" height="52" />
+            </button>
+          </div>
+        </div>
       </section>
       </section>
-      <p class="skill-note">PVE는 단일과 광역으로 나눕니다. PVP는 이 직업이 살릴 수 있는 역할로 나눕니다. 각 줄의 앞 4칸은 시전 순서입니다. 방어 감소는 먼저, 넉백은 마지막에 둡니다. 아래 표의 스킬 이미지만 끌어다 놓을 수 있습니다.</p>
+      <p class="skill-note">PVE는 단일과 광역으로 나눕니다. PVP는 이 직업이 살릴 수 있는 역할로 나눕니다. 칸을 누르면 그 칸을 바꿀 스킬이 열립니다. 기술 4칸은 같은 줄에서만 끌어 순서를 바꿀 수 있고, 단일 기술은 광역 줄로 옮길 수 없습니다.</p>
       <div class="tier-heading">
         <h3>티어</h3>
-        <label class="prior-toggle">
-          <input v-model="includePrior" type="checkbox" />
-          이전스킬 포함
-        </label>
       </div>
       <section v-for="group in tierGroups" :key="group.tier" class="skill-tier">
         <h3>
@@ -620,15 +738,7 @@ async function dropProfile(id) {
             @click="openSkill(skill.id, $event)"
           >
             <span class="tier-icon">
-              <img
-                :src="skill.skill.icon"
-                :alt="skill.skill.name"
-                width="56"
-                height="56"
-                draggable="true"
-                @dragstart.stop="startDrag(skill, $event)"
-                @dragend.stop="endDrag"
-              />
+              <img :src="skill.skill.icon" :alt="skill.skill.name" width="56" height="56" draggable="false" />
               <b v-if="skill.grade" class="grade" :class="GRADE_CLASS[skill.grade]">{{ skill.grade }}</b>
             </span>
             <strong>{{ skill.skill.name }}</strong>
@@ -636,7 +746,6 @@ async function dropProfile(id) {
               <em :class="skill.kind === 'Technique' ? 'tech' : 'charm'">{{ skill.kind === "Technique" ? "기술" : "특성" }}</em>
               <em :class="skill.quality.toLowerCase()">{{ QUALITY_LABEL[skill.quality] }}</em>
             </span>
-            <p>{{ skill.description }}</p>
           </button>
         </div>
       </section>

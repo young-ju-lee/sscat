@@ -15,8 +15,17 @@ async function request(url, { method = "GET", body } = {}) {
     throw new Error("서버에 연결하지 못했습니다.");
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.message || "요청에 실패했습니다.");
+  if (!response.ok) {
+    const error = new Error(data.message || "요청에 실패했습니다.");
+    error.status = response.status;
+    throw error;
+  }
   return data;
+}
+
+export async function checkDoor(code) {
+  const data = await request("/api/door", { method: "POST", body: { code } });
+  return data.ok === true;
 }
 
 export async function signUp(loginId, password) {
@@ -57,6 +66,22 @@ export async function loadProfiles() {
 
 export async function saveProfile(profile) {
   return request("/api/profiles", { method: "PUT", body: profile });
+}
+
+export function loadRoster() {
+  return request("/api/board/roster");
+}
+
+export function saveRoster(entry) {
+  return request("/api/board/roster", { method: "PUT", body: entry });
+}
+
+export function cancelRoster(id) {
+  return request("/api/board/roster", { method: "DELETE", body: { id } });
+}
+
+export function moveRoster(move) {
+  return request("/api/board/roster/move", { method: "POST", body: move });
 }
 
 export async function deleteProfile(id) {
