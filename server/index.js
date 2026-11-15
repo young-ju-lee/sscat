@@ -297,7 +297,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(port, "127.0.0.1", () => {
   if (!process.env.DATABASE_URL) {
-    console.warn("DATABASE_URL이 없습니다. .env에 Postgres 연결 문자열을 넣어 주세요.");
+    console.warn("DATABASE_URL이 없습니다. Supabase Connect에서 URI를 복사해 .env에 넣어 주세요.");
   }
   console.log(`api listening on ${port}`);
 });

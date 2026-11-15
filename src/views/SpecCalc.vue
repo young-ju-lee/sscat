@@ -384,7 +384,7 @@ function showEditNote(message, isError) {
 async function updateCurrent() {
   localStorage.setItem("sxs-profiles-v1", JSON.stringify(profiles.value));
   if (!account.value) {
-    showEditNote("반영됨", false);
+    showEditNote("로그인해야 DB에 저장됩니다.", true);
     return;
   }
   try {

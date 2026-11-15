@@ -9,13 +9,18 @@ function connectionString() {
 }
 
 export function getPool() {
-  if (!process.env.DATABASE_URL) {
-    const error = new Error("DB 연결이 없습니다. 프로젝트 폴더의 .env에 DATABASE_URL을 넣어 주세요.");
+  const connection = connectionString();
+  if (!connection) {
+    const error = new Error("DB 연결이 없습니다. Supabase의 Connect에서 URI를 복사해 .env의 DATABASE_URL에 넣어 주세요.");
     error.status = 503;
     throw error;
   }
   if (!pool) {
-    pool = new Pool({ connectionString: connectionString(), max: 5 });
+    const config = { connectionString: connection, max: 5 };
+    if (connection.includes("supabase.co") || connection.includes("pooler.supabase.com")) {
+      config.ssl = { rejectUnauthorized: false };
+    }
+    pool = new Pool(config);
     pool.on("error", (err) => {
       console.error(err);
     });
@@ -41,7 +46,7 @@ export function mapDbError(err) {
     throw error;
   }
   console.error(err);
-  const error = new Error("DB에 연결하지 못했습니다. .env의 DATABASE_URL과 sql/auth.sql 실행 여부를 확인해 주세요.");
+  const error = new Error("Supabase에 연결하지 못했습니다. Connect에서 복사한 URI와 sql/auth.sql 실행 여부를 확인해 주세요.");
   error.status = 503;
   throw error;
 }
