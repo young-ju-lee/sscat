@@ -1,6 +1,7 @@
 import skillTiers from "../data/skillTiers.json" with { type: "json" };
 import { SKILL_RULES } from "../data/classGuides.js";
 import { evaluateSkill } from "./combat.js";
+import { a as battleModel } from "./damageFormula.js";
 
 const NOTES = new Map();
 for (const list of Object.values(skillTiers)) {
@@ -281,6 +282,7 @@ function refine(seed, techs, charms) {
     for (const card of techs) {
       if (techSet.some((item) => item.id === card.id)) continue;
       for (let index = 0; index < techSet.length; index += 1) {
+        if (techSet.some((item) => item.id === card.id)) break;
         const next = techSet.slice();
         next[index] = card;
         const scored = scoreSet(next, charmSet);
@@ -294,6 +296,7 @@ function refine(seed, techs, charms) {
     for (const card of charms) {
       if (charmSet.some((item) => item.id === card.id)) continue;
       for (let index = 0; index < charmSet.length; index += 1) {
+        if (charmSet.some((item) => item.id === card.id)) break;
         const next = charmSet.slice();
         next[index] = card;
         const scored = scoreSet(techSet, next);
@@ -350,6 +353,9 @@ function prepare(row, profile, arena = profile.pve !== false) {
   const slopes = deals || row.expected > 0
     ? slopesOf(row, profile, arena, sameArena ? row.expected : undefined)
     : emptySlope(sameArena ? row.expected || 0 : evalAt(row, profile, {}, arena));
+  const inflict = inflictSpec(text);
+  const knock = text.match(/(\d+)%(\s+base)?\s+chance to knock/i);
+  const knockChance = knock ? Number(knock[1]) / 100 : (/knock(?:s|ing)?(?:\s+\w+){0,3}\s+back/i.test(text) ? 1 : 0);
   return {
     row,
     id: row.skill.id,
@@ -368,9 +374,18 @@ function prepare(row, profile, arena = profile.pve !== false) {
     critRate,
     critRating,
     dmgBonus,
+    bonusRule: bonusRule(text),
+    effectHit: sumLine(row, "효과 적중", false),
+    attackerEffectHit: Number(profile.effectHit) || 0,
+    targetEffectResist: Number(profile.target?.effectResist) || 0,
+    realm: profile.realm || "Silver3",
+    level: Number(profile.level) || 1,
+    atk: Number(profile.atk) || 0,
+    targetHp: Number(profile.target?.hp) || 0,
     critDmg,
     critPower,
     blockRate,
+    defIgnore: sumLine(row, "방어 무시", true),
     perElement,
     onHit: row.skill.kind === "Charm" && /technique deals /i.test(text) && chance > 0 && row.expected > 0 && !/inflict erosion/i.test(text),
     dot: row.skill.kind === "Charm" && /inflict erosion/i.test(text) && row.expected > 0,
@@ -380,8 +395,8 @@ function prepare(row, profile, arena = profile.pve !== false) {
     shieldBreak: /shield is fully broken/i.test(text),
     blocks: /blocks an enemy/i.test(text),
     mark: /stacks to 10/i.test(text),
-    armorBreak: row.skill.id === 10015,
-    armorChance: row.skill.id === 10015 ? chance || 0.5 : 0,
+    armorBreak: Boolean(inflict && /armor/.test(inflict.kind)),
+    armorChance: inflict && /armor/.test(inflict.kind) ? inflict.chance : 0,
     dodge: /dodge/i.test(text),
     taunt: /taunt/i.test(text),
     counter: /counterattack/i.test(text),
@@ -394,9 +409,14 @@ function prepare(row, profile, arena = profile.pve !== false) {
     leap: /leaps to/i.test(text),
     lifesteal: /lifesteal/i.test(text),
     party: /all allied/i.test(text),
-    knockback: /knock(?:s|ing)?(?: them)? back/i.test(text),
+    knockback: knockChance > 0,
+    knockChance,
+    knockBase: Boolean(knock && knock[2]),
+    knockNeedsProc: knockChance > 0 && chance > 0 && Math.abs(chance - knockChance) > 0.001,
     disengage: /moves back/i.test(text),
     gather: /gathers enemies/i.test(text),
+    inflict,
+    inflictElement: row.skill.kind === "Charm" ? (text.match(/deals (Water|Fire|Wind|Light|Dark) DMG/i) || [])[1]?.toLowerCase() || "" : "",
     precast: /before battle/i.test(text),
     erosionBurst: /triggers erosion effect twice/i.test(text) ? 2 : 0,
     inflictsErosion: /inflict erosion/i.test(text),
@@ -443,8 +463,199 @@ function castOrder(techs, parts) {
   return [...techs].sort((a, b) => rank(a) - rank(b) || ((parts?.get(b) || 0) - (parts?.get(a) || 0)));
 }
 
-function perTurn(value, card) {
-  return value / (1 + (card.cooldown || 0));
+const MIN_TURNS = 10;
+const MAX_TURNS = 50;
+const TURN_DAMAGE = new Float64Array(MAX_TURNS + 1);
+const CAST_AT = new Int16Array(MAX_TURNS + 1);
+const SHRED_AT = new Uint8Array(MAX_TURNS + 1);
+const READY_AT = new Int16Array(8);
+const WEIGHT_FROM = (() => {
+  const weights = new Float64Array(MAX_TURNS + 1);
+  for (let turn = 1; turn <= MAX_TURNS; turn += 1) {
+    let sum = 0;
+    for (let length = Math.max(turn, MIN_TURNS); length <= MAX_TURNS; length += 1) sum += MAX_TURNS + 1 - length;
+    weights[turn] = sum;
+  }
+  return weights;
+})();
+const WEIGHT_SUM = (() => {
+  let sum = 0;
+  for (let length = MIN_TURNS; length <= MAX_TURNS; length += 1) sum += MAX_TURNS + 1 - length;
+  return sum;
+})();
+const EXPECTED_TURNS = (() => {
+  let sum = 0;
+  for (let length = MIN_TURNS; length <= MAX_TURNS; length += 1) sum += (MAX_TURNS + 1 - length) * length;
+  return sum / WEIGHT_SUM;
+})();
+
+function stackCap(text) {
+  const source = String(text || "");
+  const match = source.match(/stacks? up to (\d+)/i) || source.match(/stacking up (?:to )?(\d+)/i);
+  return Number(match?.[1] || 1);
+}
+
+function bonusRule(text) {
+  const source = String(text || "");
+  const cap = stackCap(source);
+  const amp = source.match(/this effect increases by (\d+)%/i);
+  if (amp && /for each (?:type of )?(?:ailment|debuff)|each ailment or debuff/i.test(source)) {
+    return { kind: "debuffAmp", percent: Number(amp[1]) / 100, cap };
+  }
+  if (/for each (?:type of )?(?:ailment|debuff)|each ailment or debuff|for each type of ailment or debuff/i.test(source)) {
+    return { kind: "debuffEach", cap };
+  }
+  if (/affected by ailments or debuffs/i.test(source)) return { kind: "debuffAny" };
+  const everyTech = source.match(/for every (\d+) techniques/i);
+  if (everyTech) return { kind: "castRamp", every: Number(everyTech[1]), cap };
+  const fromTurn = source.match(/from the caster's (\d+)(?:st|nd|rd|th) turn/i);
+  if (fromTurn && /stacks up to/i.test(source)) return { kind: "turnRamp", start: Number(fromTurn[1]), cap };
+  const targetHp = source.match(/for every (\d+)% HP lost of the target/i);
+  if (targetHp) return { kind: "targetHp", step: Number(targetHp[1]), cap };
+  const selfHp = source.match(/for every (\d+)% HP lost/i);
+  if (selfHp) return { kind: "selfHp", step: Number(selfHp[1]), cap };
+  if (/each time the caster takes Technique DMG/i.test(source) && /stacks? up to/i.test(source)) return { kind: "taken", cap };
+  const eachBuff = source.match(/each buff on the caster[^.]{0,80}?(\d+)%/i);
+  if (eachBuff) return { kind: "buffAmp", percent: Number(eachBuff[1]) / 100, cap };
+  return null;
+}
+
+function inflictSpec(text) {
+  const source = String(text || "");
+  if (/chance to inflict [a-z0-9 ]+ to grids/i.test(source)) return null;
+  const timed = source.match(/(\d+)%(?:\s+base)?\s+chance to inflict (?:\d+\s+stacks? of\s+)?([a-z]+(?:\s+[a-z]+)?)(?:\s+\d+)?\s+for\s+(\d+)\s+turns?/i);
+  if (timed) return { chance: Number(timed[1]) / 100, kind: timed[2].toLowerCase(), duration: Number(timed[3]), sticky: false };
+  const open = source.match(/(\d+)%(?:\s+base)?\s+chance to inflict (?:\d+\s+stacks? of\s+)?([a-z]+(?:\s+[a-z]+)?)(?:\s+\d+)?/i);
+  if (open) return { chance: Number(open[1]) / 100, kind: open[2].toLowerCase(), duration: 0, sticky: true };
+  const sure = source.match(/\binflicting\s+([a-z]+)/i);
+  if (sure) return { chance: 1, kind: sure[1].toLowerCase(), duration: 0, sticky: true };
+  return null;
+}
+
+function effectFactor(pack) {
+  const basis = effectBase(pack.realm, pack.level);
+  const hit = (Number(pack.effectHit) || 0) / basis;
+  const res = (Number(pack.effectResist) || 0) / basis;
+  return (1 + hit) / (1 + res);
+}
+
+const RAMP_AVERAGE = new Map();
+
+function rampAverage(every, cap) {
+  const key = `${every}:${cap}`;
+  const saved = RAMP_AVERAGE.get(key);
+  if (saved !== undefined) return saved;
+  let weighted = 0;
+  for (let length = MIN_TURNS; length <= MAX_TURNS; length += 1) {
+    const weight = MAX_TURNS + 1 - length;
+    let sum = 0;
+    for (let turn = 1; turn <= length; turn += 1) sum += Math.min(cap, Math.floor(turn / every));
+    weighted += weight * (sum / length);
+  }
+  const average = weighted / WEIGHT_SUM;
+  RAMP_AVERAGE.set(key, average);
+  return average;
+}
+
+function turnRampAverage(start, cap) {
+  const key = `turn:${start}:${cap}`;
+  const saved = RAMP_AVERAGE.get(key);
+  if (saved !== undefined) return saved;
+  let weighted = 0;
+  for (let length = MIN_TURNS; length <= MAX_TURNS; length += 1) {
+    const weight = MAX_TURNS + 1 - length;
+    let sum = 0;
+    for (let turn = 1; turn <= length; turn += 1) {
+      sum += turn < start ? 0 : Math.min(cap, turn - start + 1);
+    }
+    weighted += weight * (sum / length);
+  }
+  const average = weighted / WEIGHT_SUM;
+  RAMP_AVERAGE.set(key, average);
+  return average;
+}
+
+function ruleFactor(rule, ctx) {
+  if (!rule) return 0;
+  if (rule.kind === "debuffEach") return Math.min(rule.cap, ctx.debuffs);
+  if (rule.kind === "debuffAny") return Math.min(1, ctx.debuffs);
+  if (rule.kind === "castRamp") return rampAverage(rule.every, rule.cap);
+  if (rule.kind === "turnRamp") return turnRampAverage(rule.start, rule.cap);
+  if (rule.kind === "targetHp") return Math.min(rule.cap, 50 / rule.step);
+  if (rule.kind === "selfHp") return Math.min(rule.cap, 50 / rule.step);
+  if (rule.kind === "taken") return rampAverage(1, rule.cap);
+  return 0;
+}
+
+function expectedDebuffs(cards, pack) {
+  const factor = effectFactor(pack);
+  const byKind = new Map();
+  for (const card of cards) {
+    if (!card.inflict) continue;
+    if (card.inflictElement) {
+      const matching = cards.some((other) => other.kind === "Technique" && other.deals && other.elements.includes(card.inflictElement));
+      if (!matching) continue;
+    }
+    const chance = Math.min(1, card.inflict.chance * (card.inflict.chance < 1 ? factor : 1));
+    const cycle = 1 + Math.max(0, Math.round(Number(card.cooldown) || 0));
+    let uptime = 0;
+    if (card.inflict.sticky) {
+      const casts = card.kind === "Charm"
+        ? cards.filter((other) => other.kind === "Technique" && other.deals && (!card.inflictElement || other.elements.includes(card.inflictElement))).reduce((sum, other) => sum + (other.hits || 1), 0)
+        : Math.max(1, EXPECTED_TURNS / cycle / 4);
+      uptime = casts ? 1 - (1 - chance) ** casts : 0;
+    } else {
+      uptime = Math.min(1, (chance * card.inflict.duration) / cycle);
+    }
+    const prev = byKind.get(card.inflict.kind) || 0;
+    byKind.set(card.inflict.kind, 1 - (1 - prev) * (1 - uptime));
+  }
+  let total = 0;
+  for (const value of byKind.values()) total += value;
+  return total;
+}
+
+function collisionAmount(card) {
+  return Math.min(0.1 * (card.targetHp || 0), 0.6 * (card.atk || 0));
+}
+
+function knockRate(card, pack) {
+  if (!card.knockChance) return 0;
+  let chance = card.knockBase ? Math.min(1, card.knockChance * effectFactor(pack)) : card.knockChance;
+  if (card.knockNeedsProc) chance *= triggerChance(card, pack);
+  return chance;
+}
+
+function effectBase(realm, level) {
+  const found = battleModel.realms.find((row) => row.raw === realm);
+  const table = battleModel.bases[String(found?.table)] || [];
+  const row = table[Math.min(table.length, Math.max(1, Math.round(level) || 1)) - 1] || [];
+  return row[5] || 1;
+}
+
+function triggerChance(charm, pack) {
+  const base = charm.chance || 0;
+  if (!base) return 0;
+  const basis = effectBase(pack.realm, pack.level);
+  const hit = (Number(pack.effectHit) || 0) / basis;
+  const res = (Number(pack.effectResist) || 0) / basis;
+  return Math.min(1, base * (1 + hit) / (1 + res));
+}
+
+function openingLock(card) {
+  if (card.precast || /zero initial cd/i.test(card.text || "")) return 0;
+  const cooldown = Math.max(0, Math.round(Number(card.cooldown) || 0));
+  return cooldown;
+}
+
+function fightExpected(turnDamage, opening) {
+  let running = opening;
+  let expected = 0;
+  for (let turn = 1; turn <= MAX_TURNS; turn += 1) {
+    running += turnDamage[turn] || 0;
+    if (turn >= MIN_TURNS) expected += (MAX_TURNS + 1 - turn) * running;
+  }
+  return expected / WEIGHT_SUM;
 }
 
 function sumLine(row, label, pct) {
@@ -492,11 +703,11 @@ function techKeep(card) {
 }
 
 function engineRank(card) {
-  return (card.perElement ? 8 : 0) + (card.mark ? 6 : 0) + (card.blocks ? 6 : 0) + (card.shieldBreak ? 6 : 0) + (card.soul ? 6 : 0) + (card.onHit ? 5 : 0) + (card.mastery > 0 ? 4 : 0) + ((card.critRate > 0 || card.critRating > 0) ? 4 : 0) + (card.dmgBonus > 0 ? 3 : 0) + (card.blockRate > 0 ? 3 : 0) + ((card.critDmg > 0 || card.critPower > 0) ? 3 : 0);
+  return (card.perElement ? 8 : 0) + (card.mark ? 6 : 0) + (card.blocks ? 6 : 0) + (card.shieldBreak ? 6 : 0) + (card.soul ? 6 : 0) + (card.onHit ? 5 : 0) + (card.effectHit > 0 ? 5 : 0) + (card.mastery > 0 ? 4 : 0) + ((card.critRate > 0 || card.critRating > 0) ? 4 : 0) + (card.dmgBonus > 0 ? 3 : 0) + (card.blockRate > 0 ? 3 : 0) + ((card.critDmg > 0 || card.critPower > 0) ? 3 : 0);
 }
 
 function charmKeep(card) {
-  return card.onHit || card.perElement || card.soul || card.shieldBreak || card.blocks || card.mark || card.blockRate > 0 || card.mastery > 0 || card.critRate > 0 || card.critRating > 0 || card.dmgBonus > 0 || card.critDmg > 0 || card.critPower > 0;
+  return card.onHit || card.perElement || card.soul || card.shieldBreak || card.blocks || card.mark || card.blockRate > 0 || card.mastery > 0 || card.critRate > 0 || card.critRating > 0 || card.dmgBonus > 0 || card.critDmg > 0 || card.critPower > 0 || card.effectHit > 0;
 }
 
 function techniquePool(cards) {
@@ -565,44 +776,142 @@ function combine(pool, visit) {
 }
 
 function turnValue(card) {
-  return card.base * card.ownHits * card.statedMultiplier / (1 + (card.cooldown || 0));
+  const damage = card.base * card.ownHits * card.statedMultiplier;
+  if (!(damage > 0)) return card.base || 0;
+  return soloExpected(damage, openingLock(card), Math.max(0, Math.round(Number(card.cooldown) || 0)));
+}
+
+function soloExpected(damage, lock, cooldown) {
+  let running = 0;
+  let expected = 0;
+  let ready = 1 + lock;
+  for (let turn = 1; turn <= MAX_TURNS; turn += 1) {
+    if (ready <= turn) {
+      running += damage;
+      ready = turn + 1 + cooldown;
+    }
+    if (turn >= MIN_TURNS) expected += (MAX_TURNS + 1 - turn) * running;
+  }
+  return expected / WEIGHT_SUM;
+}
+
+function oneCast(tech, charms, pack, shred) {
+  let value = 0;
+  const copies = tech.ownHits * tech.statedMultiplier;
+  if (tech.deals) {
+    value = scaled(tech, pack) * copies;
+    if (shred > 0 && !tech.armorBreak) value += tech.armorDelta * copies * shred;
+    if (pack.ignoreRatio) value += tech.armorDelta * copies * pack.ignoreRatio;
+  }
+  if (tech.erosionBurst && pack.erosionTick > 0) value += tech.erosionBurst * pack.erosionTick;
+  if (tech.knockChance) value += collisionAmount(tech) * knockRate(tech, pack);
+  const procs = [];
+  for (const charm of charms) {
+    if (tech.deals && charm.knockChance && charm.onHit) value += collisionAmount(charm) * knockRate(charm, pack);
+    if (!charm.onHit) continue;
+    const procHits = tech.deals && (!charm.procElement || tech.elements.includes(charm.procElement)) ? tech.procHits : 0;
+    if (!procHits) continue;
+    const proc = scaled(charm, pack) * triggerChance(charm, pack) * procHits;
+    value += proc;
+    procs.push([charm, proc]);
+  }
+  return { total: value, procs };
 }
 
 function scoreSet(techs, charms) {
   const pack = bonuses(techs, charms);
-  const order = castOrder(techs);
-  let total = 0;
-  const parts = new Map();
-  let shred = 0;
-  for (const tech of order) {
-    let value = 0;
-    const copies = tech.ownHits * tech.statedMultiplier;
-    if (tech.deals) {
-      value = scaled(tech, pack) * copies;
-      if (shred > 0 && !tech.armorBreak) value += tech.armorDelta * copies * shred;
-    }
-    if (tech.erosionBurst && pack.erosionTick > 0) value += tech.erosionBurst * pack.erosionTick;
-    value = perTurn(value, tech);
-    for (const charm of charms) {
-      if (!charm.onHit) continue;
-      const procHits = tech.deals && (!charm.procElement || tech.elements.includes(charm.procElement)) ? tech.procHits : 0;
-      if (!procHits) continue;
-      const proc = perTurn(scaled(charm, pack) * charm.chance * procHits, tech);
-      value += proc;
-      parts.set(charm, (parts.get(charm) || 0) + proc);
-    }
-    parts.set(tech, value);
-    total += value;
-    if (tech.armorBreak) shred = Math.max(shred, tech.armorChance);
+  const source = techs[0] || charms[0];
+  pack.effectHit = (source?.attackerEffectHit || 0) + [...techs, ...charms].reduce((sum, card) => sum + (card.effectHit || 0), 0);
+  pack.effectResist = source?.targetEffectResist || 0;
+  pack.realm = source?.realm || "Silver3";
+  pack.level = source?.level || 1;
+  pack.atk = source?.atk || 0;
+  pack.targetHp = source?.targetHp || 0;
+  const equipped = [...techs, ...charms];
+  const buffs = equipped.filter((card) => card.shield || (card.precast && !card.deals)).length;
+  let ignore = 0;
+  for (const card of equipped) {
+    ignore += card.defIgnore || 0;
+    if (card.bonusRule?.kind === "buffAmp") ignore += 100 * card.bonusRule.percent * Math.min(card.bonusRule.cap, buffs);
+  }
+  pack.ignoreRatio = ignore / 30;
+  const debuffs = expectedDebuffs(equipped, pack);
+  for (const card of equipped) {
+    const rule = card.bonusRule;
+    if (!rule || !card.dmgBonus || rule.kind === "debuffAmp") continue;
+    pack.dmgBonus += card.dmgBonus * ruleFactor(rule, { debuffs });
+  }
+  for (const card of equipped) {
+    const rule = card.bonusRule;
+    if (rule?.kind !== "debuffAmp" || !card.dmgBonus) continue;
+    pack.dmgBonus += card.dmgBonus * rule.percent * Math.min(rule.cap, debuffs);
+  }
+  const shred = techs.reduce((max, tech) => Math.max(max, tech.armorChance || 0), 0);
+  const casts = techs.map((tech) => ({
+    tech,
+    plain: oneCast(tech, charms, pack, 0),
+    shredded: oneCast(tech, charms, pack, shred),
+    lock: openingLock(tech),
+    cooldown: Math.max(0, Math.round(Number(tech.cooldown) || 0)),
+    armorBreak: Boolean(tech.armorBreak),
+    precast: Boolean(tech.precast),
+  }));
+  const unlock = casts.reduce((sum, cast) => sum + Math.max(0, cast.shredded.total - cast.plain.total), 0);
+  const passive = charms.reduce((sum, charm) => sum + charmValue(charm, techs, pack), 0);
+  TURN_DAMAGE.fill(0);
+  let opening = 0;
+  for (let index = 0; index < casts.length; index += 1) {
+    const cast = casts[index];
+    READY_AT[index] = cast.precast ? MAX_TURNS + 2 : 1 + cast.lock;
+    if (cast.precast) opening += cast.plain.total;
   }
   for (const charm of charms) {
-    const value = charmValue(charm, order, pack);
-    if (!value) continue;
-    parts.set(charm, (parts.get(charm) || 0) + value);
-    total += value;
+    if (charm.onHit || !charm.knockChance) continue;
+    opening += collisionAmount(charm) * knockRate(charm, pack);
   }
-  const weight = charms.filter((charm) => (parts.get(charm) || 0) > 1 || charm.mastery || charm.critRate || charm.critRating || charm.dmgBonus || charm.critDmg || charm.critPower).length;
-  return { total, parts, weight };
+  let shredded = false;
+  for (let turn = 1; turn <= MAX_TURNS; turn += 1) {
+    let pick = -1;
+    let bestPriority = 0;
+    for (let index = 0; index < casts.length; index += 1) {
+      const cast = casts[index];
+      if (cast.precast || READY_AT[index] > turn) continue;
+      const hit = shredded ? cast.shredded.total : cast.plain.total;
+      const priority = hit + (cast.armorBreak && !shredded && shred > 0 ? unlock : 0);
+      if (!(priority > bestPriority)) continue;
+      pick = index;
+      bestPriority = priority;
+    }
+    CAST_AT[turn] = pick;
+    SHRED_AT[turn] = shredded ? 1 : 0;
+    TURN_DAMAGE[turn] = passive;
+    if (pick < 0) continue;
+    const cast = casts[pick];
+    TURN_DAMAGE[turn] += SHRED_AT[turn] ? cast.shredded.total : cast.plain.total;
+    READY_AT[pick] = turn + 1 + cast.cooldown;
+    if (cast.armorBreak) shredded = true;
+  }
+  const total = fightExpected(TURN_DAMAGE, opening);
+  const parts = new Map();
+  const share = (card, amount) => parts.set(card, (parts.get(card) || 0) + amount);
+  for (const cast of casts) {
+    if (cast.precast && cast.plain.total) share(cast.tech, cast.plain.total);
+  }
+  for (let turn = 1; turn <= MAX_TURNS; turn += 1) {
+    const pick = CAST_AT[turn];
+    if (pick < 0) continue;
+    const weight = WEIGHT_FROM[turn] / WEIGHT_SUM;
+    const cast = casts[pick];
+    const hit = SHRED_AT[turn] ? cast.shredded : cast.plain;
+    share(cast.tech, hit.total * weight);
+    for (const [charm, proc] of hit.procs) share(charm, proc * weight);
+  }
+  for (const charm of charms) {
+    const value = charmValue(charm, techs, pack);
+    if (value) share(charm, value * EXPECTED_TURNS);
+  }
+  const listed = charms.filter((charm) => (parts.get(charm) || 0) > 1 || charm.mastery || charm.critRate || charm.critRating || charm.dmgBonus || charm.critDmg || charm.critPower).length;
+  return { total, parts, weight: listed };
 }
 
 function charmRank(charm, best, pack) {
@@ -640,7 +949,7 @@ function bonuses(techs, charms) {
     mastery += card.perElement ? card.mastery * stacks : card.mastery;
     critRate += card.critRate;
     critRating += card.critRating;
-    dmgBonus += card.dmgBonus;
+    if (!card.bonusRule || card.bonusRule.kind === "debuffAmp") dmgBonus += card.dmgBonus;
     critDmg += card.critDmg;
     critPower += card.critPower;
     blockRate += card.blockRate;
@@ -694,5 +1003,6 @@ function charmValue(charm, techs, pack) {
   if (charm.shieldBreak) return pack.shield ? hit : 0;
   if (charm.blocks) return hit * (pack.blockRate / 100);
   if (charm.mark) return hit * (pack.hits / 10);
+  if (charm.counter) return hit * (charm.chance || 1);
   return 0;
 }

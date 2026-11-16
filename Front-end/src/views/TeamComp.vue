@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { BOARD_ROLES, organize, parsePower, partyTotal } from "../lib/board.js";
-import { cancelRoster, loadRoster, moveRoster, saveRoster } from "../lib/session.js";
+import { cancelRoster, loadMembers, loadRoster, moveRoster, placeMember, saveRoster, unplaceMember } from "../lib/session.js";
 
 const PROFILE_KEY = "sxs-board-profile";
 
@@ -19,6 +19,8 @@ const role = ref(BOARD_ROLES.includes(profile?.role) ? profile.role : BOARD_ROLE
 const power = ref("");
 const editingId = ref("");
 const entries = ref([]);
+const members = ref([]);
+const membersError = ref("");
 const message = ref("");
 const messageIsSummary = ref(true);
 const moveStatus = ref("");
@@ -31,6 +33,11 @@ const dragPos = ref(null);
 let dragSession = 0;
 
 const board = computed(() => organize(entries.value));
+const parties = computed(() => (board.value.parties.length ? board.value.parties : [BOARD_ROLES.map(() => null)]));
+const bench = computed(() => {
+  const placed = new Set(entries.value.map((entry) => entry.profileId).filter(Boolean));
+  return members.value.filter((member) => !placed.has(member.profileId));
+});
 const mineEntries = computed(() => entries.value.filter((entry) => entry.mine));
 const editing = computed(() => mineEntries.value.find((entry) => entry.id === editingId.value) || null);
 
@@ -78,7 +85,13 @@ async function refresh(manual = false) {
   refreshing.value = true;
   if (manual) refreshStatus.value = "명단 확인 중…";
   try {
-    apply(await loadRoster(), { note: manual || !message.value });
+    const [roster, rosterMembers] = await Promise.all([
+      loadRoster(),
+      loadMembers().catch(() => ({ members: [], failed: true })),
+    ]);
+    apply(roster, { note: manual || !message.value });
+    members.value = Array.isArray(rosterMembers.members) ? rosterMembers.members : [];
+    membersError.value = rosterMembers.failed ? "길드원 명단을 불러오지 못했어요. API를 다시 띄운 뒤 새로고침해 주세요." : "";
     if (manual) refreshStatus.value = "명단을 업데이트했어요.";
   } catch (err) {
     refreshStatus.value = manual ? "명단을 새로고침하지 못했어요." : (err.message || "명단을 불러오지 못했습니다.");
@@ -134,11 +147,17 @@ function missing(party) {
 }
 
 function dragged() {
-  return entries.value.find((entry) => entry.id === dragId.value) || null;
+  if (String(dragId.value).startsWith("member:")) {
+    const member = members.value.find((item) => item.profileId === dragId.value.slice(7));
+    return member ? { ...member, member: true, id: dragId.value } : null;
+  }
+  const entry = entries.value.find((item) => item.id === dragId.value);
+  return entry ? { ...entry, member: false } : null;
 }
 
 function targetAt(x, y, source) {
   const stack = document.elementsFromPoint(x, y);
+  if (stack.some((node) => node.classList?.contains("guild-card"))) return { bench: true };
   const row = stack.find((node) => node.classList?.contains("party-row"));
   if (row instanceof HTMLElement) {
     const rect = row.getBoundingClientRect();
@@ -156,6 +175,15 @@ function targetAt(x, y, source) {
 
 function onPointerDown(entry, event) {
   if (!entry || event.button !== 0 || saving.value) return;
+  startDrag(entry, event, () => entry);
+}
+
+function onMemberDown(member, event) {
+  if (!member || event.button !== 0 || saving.value) return;
+  startDrag({ ...member, member: true, id: `member:${member.profileId}` }, event, () => dragged());
+}
+
+function startDrag(entry, event, current) {
   event.preventDefault();
   const originX = event.clientX;
   const originY = event.clientY;
@@ -167,7 +195,7 @@ function onPointerDown(entry, event) {
     if (!started) {
       if (Math.hypot(ev.clientX - originX, ev.clientY - originY) < 5) return;
       started = true;
-      dragId.value = entry.id;
+      dragId.value = entry.member ? `member:${entry.profileId}` : entry.id;
       document.body.classList.add("board-dragging");
     }
     dragPos.value = { x: ev.clientX, y: ev.clientY };
@@ -179,20 +207,72 @@ function onPointerDown(entry, event) {
     window.removeEventListener("pointerup", end);
     window.removeEventListener("pointercancel", end);
     document.body.classList.remove("board-dragging");
-    const hit = started ? targetAt(ev.clientX, ev.clientY, entry) : null;
+    const hit = started ? targetAt(ev.clientX, ev.clientY, current() || entry) : null;
+    const source = current() || entry;
     dragId.value = "";
     dragPos.value = null;
     dragOver.value = null;
-    if (!started || !hit || hit.party === entry.party) return;
-    if (BOARD_ROLES[hit.roleIndex] !== entry.role) {
+    if (!started || !hit || !source) return;
+    if (hit.bench) {
+      if (source.profileId && !source.member) finishUnplace(source);
+      else if (!source.member) moveStatus.value = "참석 추가로 넣은 캐릭터는 참석 취소로 빼 주세요.";
+      return;
+    }
+    if (source.member) {
+      if (BOARD_ROLES[hit.roleIndex] !== source.role) {
+        moveStatus.value = "같은 직업 자리에만 넣을 수 있어요.";
+        return;
+      }
+      const party = parties.value[hit.party - 1] || [];
+      if (party[hit.roleIndex]) {
+        moveStatus.value = "그 자리에는 이미 같은 직업이 있어요.";
+        return;
+      }
+      finishPlace(source, hit.party);
+      return;
+    }
+    if (hit.party === source.party) return;
+    if (BOARD_ROLES[hit.roleIndex] !== source.role) {
       moveStatus.value = "같은 직업끼리만 옮기거나 바꿀 수 있어요. 같은 직업이 두 명이 되는 자리는 바꿀 수 없어요.";
       return;
     }
-    finishMove(entry, hit.party);
+    finishMove(source, hit.party);
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", end);
   window.addEventListener("pointercancel", end);
+}
+
+async function finishPlace(member, partyNumber) {
+  if (!member || saving.value) return;
+  saving.value = true;
+  moveStatus.value = "";
+  try {
+    apply(await placeMember({ profileId: member.profileId, party: partyNumber }));
+    moveStatus.value = `${member.nick} 님을 ${partyNumber}파티에 넣었어요.`;
+  } catch (err) {
+    moveStatus.value = err.message || "길드원을 파티에 넣지 못했어요.";
+  } finally {
+    saving.value = false;
+    dragId.value = "";
+    dragOver.value = null;
+  }
+}
+
+async function finishUnplace(entry) {
+  if (!entry || saving.value) return;
+  saving.value = true;
+  moveStatus.value = "";
+  try {
+    apply(await unplaceMember(entry.id));
+    moveStatus.value = `${entry.nick} 님을 파티에서 빼 길드원으로 돌렸어요.`;
+  } catch (err) {
+    moveStatus.value = err.message || "파티에서 빼지 못했어요.";
+  } finally {
+    saving.value = false;
+    dragId.value = "";
+    dragOver.value = null;
+  }
 }
 
 async function finishMove(source, partyNumber) {
@@ -214,12 +294,14 @@ async function finishMove(source, partyNumber) {
 function rowClass(partyNumber, roleIndex, entry) {
   const source = dragged();
   const over = dragOver.value?.party === partyNumber && dragOver.value?.roleIndex === roleIndex;
-  const sameRole = source && source.role === BOARD_ROLES[roleIndex] && source.party !== partyNumber;
+  const role = BOARD_ROLES[roleIndex];
+  const memberDrop = Boolean(source?.member && source.role === role && !entry);
+  const sameRole = Boolean(source && !source.member && source.role === role && source.party !== partyNumber);
   return {
     dragging: entry?.id === dragId.value,
-    "can-drop": Boolean(sameRole),
-    "drop-ok": Boolean(over && sameRole),
-    "drop-bad": Boolean(over && source && !sameRole),
+    "can-drop": memberDrop || sameRole,
+    "drop-ok": Boolean(over && (memberDrop || sameRole)),
+    "drop-bad": Boolean(over && source && source.role !== role),
   };
 }
 
@@ -250,6 +332,7 @@ onUnmounted(() => {
   </header>
 
   <div class="board">
+    <div class="stack">
     <section class="card">
       <h2>내 참석 신청</h2>
       <form @submit.prevent="submit">
@@ -283,6 +366,26 @@ onUnmounted(() => {
       </ul>
     </section>
 
+    <section class="card guild-card">
+      <h2>길드원</h2>
+      <p class="hint">가입한 사용자의 닉네임과 직업입니다. 같은 직업 칸으로 끌어다 넣고, 이 영역으로 다시 끌어오면 파티에서 빠집니다.</p>
+      <div class="guild-bench" :class="{ 'drop-ok': dragOver?.bench && dragged()?.profileId && !dragged()?.member }">
+        <button
+          v-for="member in bench"
+          :key="member.profileId"
+          type="button"
+          class="guild-chip"
+          :class="['r' + BOARD_ROLES.indexOf(member.role), { dragging: dragId === `member:${member.profileId}` }]"
+          @pointerdown="onMemberDown(member, $event)"
+        >
+          {{ member.nick }}
+        </button>
+        <p v-if="membersError" class="status">{{ membersError }}</p>
+        <p v-else-if="!bench.length" class="status">대기 중인 길드원이 없어요.</p>
+      </div>
+    </section>
+    </div>
+
     <section>
       <div class="board-title">
         <h2>파티 현황</h2>
@@ -299,9 +402,8 @@ onUnmounted(() => {
       </div>
       <p class="hint">같은 직업 자리로만 옮길 수 있어요. 다른 직업 자리에 놓으면 그 파티에 같은 직업이 두 명이 되어 바뀌지 않아요.</p>
       <p class="status move-status">{{ moveStatus }}</p>
-      <p v-if="!board.parties.length" class="card status">아직 참석자가 없어요.</p>
       <article
-        v-for="(party, index) in board.parties"
+        v-for="(party, index) in parties"
         :key="index"
         class="card party"
         :data-party="index + 1"
@@ -325,7 +427,7 @@ onUnmounted(() => {
           >
             <span class="role" :class="'r' + roleIndex">{{ BOARD_ROLES[roleIndex] }}</span>
             <b :class="{ mine: entry?.mine }">{{ entry ? entry.nick + (entry.mine ? " · 나" : "") : "빈자리" }}</b>
-            <span class="status">{{ entry ? entry.power.toLocaleString("ko-KR") : "—" }}</span>
+            <span class="status">{{ entry?.power ? entry.power.toLocaleString("ko-KR") : "—" }}</span>
           </div>
         </div>
       </article>

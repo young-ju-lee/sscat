@@ -214,6 +214,8 @@ async function checkDoor(env, body) {
   return { ok: stored.length > 0 && stored === given };
 }
 
+const ROLE_BY_BRANCH = { guard: "기사", duel: "투사", burst: "주술사", support: "현자" };
+
 function rosterEntries(rows, ownerId) {
   return rows.map((row) => ({
     id: row.id,
@@ -222,16 +224,67 @@ function rosterEntries(rows, ownerId) {
     power: Number(row.power),
     party: Number(row.party),
     order: Number(row.sort_order),
-    mine: row.owner_id === ownerId,
+    mine: row.owner_id === ownerId && !row.profile_id,
+    profileId: row.profile_id || "",
+    userId: row.user_id || "",
   }));
 }
 
 async function listRoster(env) {
-  const rows = await rest(
-    env,
-    "roster?select=id,owner_id,nick,role,power,party,sort_order&order=party.asc,sort_order.asc",
-  );
-  return Array.isArray(rows) ? rows : [];
+  const order = "&order=party.asc,sort_order.asc";
+  const base = "roster?select=id,owner_id,nick,role,power,party,sort_order";
+  try {
+    const rows = await rest(env, `${base},user_id,profile_id${order}`);
+    return Array.isArray(rows) ? rows : [];
+  } catch (error) {
+    if (!/user_id|profile_id|column|schema cache/i.test(error.message || "")) throw error;
+    const rows = await rest(env, `${base}${order}`);
+    return Array.isArray(rows) ? rows : [];
+  }
+}
+
+function roleFromPayload(payload) {
+  let body = payload;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      body = {};
+    }
+  }
+  return ROLE_BY_BRANCH[body?.branch] || "";
+}
+
+function memberNick(profile, user) {
+  const name = String(profile?.name || "").trim();
+  const account = String(user?.nickname || "").trim();
+  const generic = !name || name === "내 스펙" || name === "새 스펙";
+  return (generic ? account : name).slice(0, 24);
+}
+
+async function guildMembers(env) {
+  const users = await rest(env, "users?select=id,nickname&order=nickname.asc");
+  const profiles = await rest(env, "profiles?select=id,user_id,name,payload,updated_at&order=updated_at.desc");
+  const byUser = new Map();
+  for (const profile of profiles || []) {
+    const list = byUser.get(profile.user_id) || [];
+    list.push(profile);
+    byUser.set(profile.user_id, list);
+  }
+  const members = [];
+  const used = new Set();
+  for (const user of users || []) {
+    for (const profile of byUser.get(user.id) || []) {
+      const role = roleFromPayload(profile.payload);
+      if (!role) continue;
+      let nick = memberNick(profile, user);
+      if (!nick) continue;
+      if (used.has(nick)) nick = `${nick.slice(0, 20)} ${used.size + 1}`.trim().slice(0, 24);
+      used.add(nick);
+      members.push({ profileId: profile.id, userId: user.id, nick, role });
+    }
+  }
+  return members;
 }
 
 function nextParty(rows, role, exceptId) {
@@ -351,6 +404,68 @@ async function moveRoster(env, ownerId, body) {
   } catch (error) {
     throw rosterConflict(error);
   }
+  return loadRoster(env, ownerId);
+}
+
+async function placeMember(env, ownerId, body) {
+  const profileId = String(body?.profileId ?? "");
+  const party = Number(body?.party);
+  if (!UUID.test(profileId) || !Number.isInteger(party) || party < 1) {
+    throw httpError(400, "넣을 길드원이나 파티가 올바르지 않아요.");
+  }
+  const member = (await guildMembers(env)).find((item) => item.profileId === profileId);
+  if (!member) throw httpError(404, "가입한 길드원 스펙을 찾지 못했어요.");
+  try {
+    const rows = await listRoster(env);
+    const max = rows.reduce((value, row) => Math.max(value, Number(row.party) || 0), 0);
+    if (party > Math.max(1, max + 1)) throw httpError(400, "없는 파티예요.");
+    const existing = rows.find((row) => row.profile_id === profileId);
+    const occupant = rows.find((row) => Number(row.party) === party && row.role === member.role && row.id !== existing?.id);
+    if (occupant) throw httpError(409, "그 자리에는 이미 같은 직업이 있어요.");
+    if (existing) {
+      await patchRoster(env, existing.id, {
+        party,
+        nick: member.nick,
+        role: member.role,
+        updated_at: new Date().toISOString(),
+      });
+    } else {
+      const order = rows.reduce((value, row) => Math.max(value, Number(row.sort_order) || 0), 0) + 1;
+      let nick = member.nick;
+      if (rows.some((row) => row.nick === nick)) nick = `${nick.slice(0, 20)} ${order}`.trim().slice(0, 24);
+      await rest(env, "roster", {
+        method: "POST",
+        prefer: "return=minimal",
+        body: {
+          owner_id: ownerId,
+          user_id: member.userId,
+          profile_id: member.profileId,
+          nick,
+          role: member.role,
+          power: 0,
+          party,
+          sort_order: order,
+        },
+      });
+    }
+    await compactParties(env);
+  } catch (error) {
+    if (error.status) throw error;
+    if (/user_id|profile_id|power|check constraint|schema cache/i.test(`${error.message || ""} ${error.constraint || ""}`)) {
+      throw httpError(400, "길드원 배치를 저장하려면 roster 테이블 SQL을 먼저 실행해 주세요.");
+    }
+    throw rosterConflict(error);
+  }
+  return loadRoster(env, ownerId);
+}
+
+async function unplaceMember(env, ownerId, body) {
+  const id = String(body?.id ?? "");
+  if (!UUID.test(id)) throw httpError(400, "뺄 길드원을 찾지 못했어요.");
+  const entry = (await listRoster(env)).find((row) => row.id === id);
+  if (!entry?.profile_id) throw httpError(400, "길드원으로 넣은 참석만 다시 뺄 수 있어요.");
+  await rest(env, `roster?id=eq.${id}`, { method: "DELETE", prefer: "return=minimal" });
+  await compactParties(env);
   return loadRoster(env, ownerId);
 }
 
@@ -476,8 +591,17 @@ export default {
         return json(await checkDoor(env, await readJson(request)), 200, origin);
       }
 
-      if (pathname === "/api/board/roster" || pathname === "/api/board/roster/move") {
+      if (
+        pathname === "/api/board/members"
+        || pathname === "/api/board/roster"
+        || pathname === "/api/board/roster/move"
+        || pathname === "/api/board/roster/place"
+        || pathname === "/api/board/roster/unplace"
+      ) {
         const ownerId = boardIdFrom(request);
+        if (request.method === "GET" && pathname === "/api/board/members") {
+          return json({ members: await guildMembers(env) }, 200, origin);
+        }
         if (request.method === "GET" && pathname === "/api/board/roster") {
           return json(await loadRoster(env, ownerId), 200, origin);
         }
@@ -489,6 +613,12 @@ export default {
         }
         if (request.method === "POST" && pathname === "/api/board/roster/move") {
           return json(await moveRoster(env, ownerId, await readJson(request)), 200, origin);
+        }
+        if (request.method === "POST" && pathname === "/api/board/roster/place") {
+          return json(await placeMember(env, ownerId, await readJson(request)), 200, origin);
+        }
+        if (request.method === "POST" && pathname === "/api/board/roster/unplace") {
+          return json(await unplaceMember(env, ownerId, await readJson(request)), 200, origin);
         }
       }
 

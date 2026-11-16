@@ -95,6 +95,27 @@ CREATE TABLE IF NOT EXISTS roster (
 
 CREATE INDEX IF NOT EXISTS roster_owner_id_idx ON roster (owner_id);
 
+ALTER TABLE roster ADD COLUMN IF NOT EXISTS user_id uuid;
+ALTER TABLE roster ADD COLUMN IF NOT EXISTS profile_id uuid;
+ALTER TABLE roster DROP CONSTRAINT IF EXISTS roster_power_check;
+ALTER TABLE roster ADD CONSTRAINT roster_power_check CHECK (power >= 0);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'roster_user_id_fkey') THEN
+    ALTER TABLE roster
+      ADD CONSTRAINT roster_user_id_fkey
+      FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'roster_profile_id_fkey') THEN
+    ALTER TABLE roster
+      ADD CONSTRAINT roster_profile_id_fkey
+      FOREIGN KEY (profile_id) REFERENCES profiles (id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS roster_profile_id_idx ON roster (profile_id);
+
 DO $$
 BEGIN
   IF EXISTS (

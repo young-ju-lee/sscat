@@ -11,7 +11,6 @@ const emit = defineEmits(["toggle-pin", "hover", "navigate"]);
 
 const items = [
   { id: "spec", label: "스펙 계산", icon: "calc" },
-  { id: "team", label: "4대4 챌린지", icon: "team" },
   { id: "refs", label: "참고 사이트", icon: "link" },
 ];
 </script>

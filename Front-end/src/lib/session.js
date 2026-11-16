@@ -125,6 +125,18 @@ export function moveRoster(move) {
   return request("/api/board/roster/move", { method: "POST", body: move });
 }
 
+export function loadMembers() {
+  return request("/api/board/members");
+}
+
+export function placeMember(body) {
+  return request("/api/board/roster/place", { method: "POST", body });
+}
+
+export function unplaceMember(id) {
+  return request("/api/board/roster/unplace", { method: "POST", body: { id } });
+}
+
 export async function deleteProfile(id) {
   await request(`/api/profiles/${id}`, { method: "DELETE" });
 }
