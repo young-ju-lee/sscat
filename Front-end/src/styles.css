@@ -44,6 +44,7 @@ h1, h2, h3, p { margin: 0; }
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field.wide { grid-column: 1 / -1; }
 .field span, .check { color: var(--muted); font-size: 12px; }
+.field-check { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 input, select {
   width: 100%;
   background: var(--field);
@@ -52,6 +53,8 @@ input, select {
   padding: 8px 10px;
 }
 input:focus, select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+input:disabled { cursor: default; opacity: 0.72; }
+.field-check input { width: 14px; height: 14px; margin: 0; padding: 0; accent-color: var(--accent); opacity: 1; }
 
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .btn {

@@ -44,7 +44,8 @@ export function defaultProfile() {
     elemAffinity: 0,
     blockIgnore: 0,
     blockIgnoreRating: 0,
-    flatDmgAdd: 0,
+    flatDmgAdd: "",
+    flatDmgOn: false,
     elem: { wind: 0, water: 0, fire: 0, light: 0, dark: 0 },
     bless: { wind: 0, water: 0, fire: 0, light: 0, dark: 0 },
     critPowerFlat: 0,
@@ -98,6 +99,8 @@ function fillProfile(raw) {
     elem: { ...base.elem, ...(raw.elem || {}) },
     bless: { ...base.bless, ...(raw.bless || {}) },
     target: { ...base.target, ...(raw.target || {}) },
+    flatDmgOn: raw.flatDmgOn ?? Boolean(Number(raw.flatDmgAdd)),
+    flatDmgAdd: (raw.flatDmgOn ?? Boolean(Number(raw.flatDmgAdd))) ? (raw.flatDmgAdd ?? "") : "",
   };
 }
 

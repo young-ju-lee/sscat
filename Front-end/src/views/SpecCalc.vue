@@ -461,6 +461,11 @@ function storePreset() {
   saveAs(name);
 }
 
+function setFlatDmgOn(on) {
+  profile.value.flatDmgOn = on;
+  if (!on) profile.value.flatDmgAdd = "";
+}
+
 function showEditNote(message, isError) {
   editError.value = isError;
   editNote.value = message;
@@ -477,9 +482,15 @@ async function updateCurrent() {
     showEditNote("로그인해야 DB에 저장됩니다.", true);
     return;
   }
+  window.clearTimeout(editTimer);
+  editError.value = false;
+  editNote.value = "DB 저장 중";
+  const started = Date.now();
   try {
     await saveProfile(JSON.parse(JSON.stringify(profile.value)));
-    showEditNote("DB에 저장됨", false);
+    const wait = 400 - (Date.now() - started);
+    if (wait > 0) await new Promise((resolve) => window.setTimeout(resolve, wait));
+    showEditNote("DB저장 완료", false);
   } catch (err) {
     showEditNote(err.message || "DB 저장에 실패했습니다.", true);
   }
@@ -588,7 +599,18 @@ async function dropProfile(id) {
       <label class="field"><span>원소 저항</span><input v-model.number="profile.elemResist" type="number" min="0" /></label>
       <label class="field"><span>물리 마스터리</span><input v-model.number="profile.physMastery" type="number" min="0" /></label>
       <label class="field"><span>물리 저항</span><input v-model.number="profile.physResist" type="number" min="0" /></label>
-      <label class="field"><span>고정 피해 추가</span><input v-model.number="profile.flatDmgAdd" type="number" /></label>
+      <div class="field">
+        <span class="field-check">
+          고정 피해 추가
+          <input type="checkbox" :checked="profile.flatDmgOn" aria-label="고정 피해 추가 입력" @change="setFlatDmgOn($event.target.checked)" />
+        </span>
+        <input
+          :value="profile.flatDmgOn ? profile.flatDmgAdd : ''"
+          type="number"
+          :disabled="!profile.flatDmgOn"
+          @input="profile.flatDmgAdd = $event.target.value === '' ? '' : Number($event.target.value)"
+        />
+      </div>
       <p class="stat-group">세부</p>
       <label class="field"><span>바람 원소 친화</span><input v-model.number="profile.elem.wind" type="number" min="0" /></label>
       <label class="field"><span>물 원소 친화</span><input v-model.number="profile.elem.water" type="number" min="0" /></label>

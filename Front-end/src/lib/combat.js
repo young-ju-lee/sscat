@@ -176,7 +176,7 @@ function toFighter(src, side) {
     dodge: pct(src.dodge),
     dmgBonus: pct(src.dmgBonus),
     dmgResist: pct(src.dmgResist),
-    flatDmgAdd: Number(src.flatDmgAdd) || 0,
+    flatDmgAdd: src.flatDmgOn ? (Number(src.flatDmgAdd) || 0) : 0,
     flatDmgReduce: Number(src.flatDmgReduce) || 0,
     critPowerFlat: Number(src.critPowerFlat) || 0,
     blockValueFlat: Number(src.blockValueFlat) || 0,
