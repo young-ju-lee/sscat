@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS profile_skills (
 
 CREATE INDEX IF NOT EXISTS profile_skills_profile_id_idx ON profile_skills (profile_id);
 
+ALTER TABLE profile_skills
+  ADD COLUMN IF NOT EXISTS unowned boolean NOT NULL DEFAULT false;
+
 CREATE TABLE IF NOT EXISTS auth_code (
   id   text PRIMARY KEY,
   code text NOT NULL

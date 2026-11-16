@@ -147,7 +147,9 @@ function fighterSource(profile, skill, pve) {
     next.mastery = Number(profile.physMastery) || 0;
     next.elemAffinity = 0;
   }
-  if (pve) next.dmgBonus = (Number(profile.dmgBonus) || 0) + (Number(profile.monsterDmg) || 0);
+  const bonus = Number(profile.dmgBonus) || 0;
+  if (pve) next.dmgBonus = bonus + (Number(profile.monsterDmg) || 0);
+  else next.dmgBonus = bonus + (Number(profile.characterDmg) || 0);
   return next;
 }
 

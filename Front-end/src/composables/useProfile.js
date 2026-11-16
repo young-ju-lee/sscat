@@ -21,6 +21,7 @@ export function defaultProfile() {
     recommendLevels: {},
     ranks: {},
     skillLevels: {},
+    unowned: {},
     boardLevels: { techniques: [100, 100, 100, 100], charms: [100, 100, 100, 100] },
     loadouts: {},
     atk: 50000,
@@ -50,6 +51,7 @@ export function defaultProfile() {
     blockIgnoreRating: 0,
     flatDmgAdd: "",
     flatDmgOn: false,
+    extraStats: [],
     elem: { wind: 0, water: 0, fire: 0, light: 0, dark: 0 },
     bless: { wind: 0, water: 0, fire: 0, light: 0, dark: 0 },
     critPowerFlat: 0,
@@ -99,6 +101,25 @@ function boardLevelsOf(raw) {
   };
 }
 
+function unownedOf(raw) {
+  const source = raw.unowned;
+  if (!source || typeof source !== "object") return {};
+  const next = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value) next[key] = true;
+  }
+  return next;
+}
+
+function extraStatsOf(raw) {
+  if (!Array.isArray(raw.extraStats)) return [];
+  return raw.extraStats.map((row) => ({
+    id: String(row?.id || crypto.randomUUID()),
+    name: String(row?.name || ""),
+    value: row?.value === 0 || row?.value ? String(row.value) : "",
+  }));
+}
+
 function fillProfile(raw) {
   const base = defaultProfile();
   const path = inferPath(raw.classId || base.classId);
@@ -115,7 +136,9 @@ function fillProfile(raw) {
     classId: resolveClass(job, branch, classTier),
     ranks: raw.ranks || {},
     skillLevels: raw.skillLevels || {},
+    unowned: unownedOf(raw),
     boardLevels: boardLevelsOf(raw),
+    extraStats: extraStatsOf(raw),
     loadouts: raw.loadouts || {},
     elem: { ...base.elem, ...(raw.elem || {}) },
     bless: { ...base.bless, ...(raw.bless || {}) },
@@ -159,6 +182,7 @@ export function useProfile() {
     copy.skillLevel = 100;
     copy.ranks = {};
     copy.skillLevels = {};
+    copy.unowned = {};
     copy.boardLevels = { techniques: [100, 100, 100, 100], charms: [100, 100, 100, 100] };
     copy.recommendReady = false;
     copy.recommendRanks = {};

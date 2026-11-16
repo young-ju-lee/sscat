@@ -363,7 +363,8 @@ function clampInt(value, min, max, fallback) {
 function skillRows(profileId, body) {
   const ranks = body?.ranks && typeof body.ranks === "object" ? body.ranks : {};
   const levels = body?.skillLevels && typeof body.skillLevels === "object" ? body.skillLevels : {};
-  const ids = new Set([...Object.keys(ranks), ...Object.keys(levels)]);
+  const unowned = body?.unowned && typeof body.unowned === "object" ? body.unowned : {};
+  const ids = new Set([...Object.keys(ranks), ...Object.keys(levels), ...Object.keys(unowned)]);
   const updatedAt = new Date().toISOString();
   const rows = [];
   for (const key of ids) {
@@ -374,6 +375,7 @@ function skillRows(profileId, body) {
       skill_id: skillId,
       rank: clampInt(ranks[key], 1, 34, 6),
       level: clampInt(levels[key], 1, 200, 100),
+      unowned: Boolean(unowned[key]),
       updated_at: updatedAt,
     });
   }
@@ -409,12 +411,15 @@ function applySkillRows(profiles, skills) {
     const payload = { ...(profile.payload || {}) };
     const ranks = {};
     const skillLevels = {};
+    const unowned = {};
     for (const skill of list) {
       ranks[skill.skill_id] = skill.rank;
       skillLevels[skill.skill_id] = skill.level;
+      if (skill.unowned) unowned[skill.skill_id] = true;
     }
     payload.ranks = ranks;
     payload.skillLevels = skillLevels;
+    payload.unowned = unowned;
     return { ...profile, payload };
   });
 }
@@ -512,7 +517,13 @@ export default {
         let skills = [];
         if (ids.length) {
           try {
-            skills = await rest(env, `profile_skills?profile_id=in.(${ids.join(",")})&select=profile_id,skill_id,rank,level`);
+            const skillPath = `profile_skills?profile_id=in.(${ids.join(",")})`;
+            try {
+              skills = await rest(env, `${skillPath}&select=profile_id,skill_id,rank,level,unowned`);
+            } catch (error) {
+              if (!/unowned/i.test(error.message || "")) throw error;
+              skills = await rest(env, `${skillPath}&select=profile_id,skill_id,rank,level`);
+            }
           } catch (error) {
             if (!/profile_skills|schema cache/i.test(error.message || "")) throw error;
           }

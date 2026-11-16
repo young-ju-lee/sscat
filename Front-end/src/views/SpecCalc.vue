@@ -31,7 +31,7 @@ const editError = ref(false);
 let editTimer = 0;
 
 const rows = computed(() => {
-  const current = profile.value;
+  const current = withExtras(profile.value);
   return findClass(current.classId).chain.flatMap((classId) =>
     skillsForClass(classId).map((skill) => {
       const rank = current.ranks[skill.id] || BASIS_RANK;
@@ -46,6 +46,7 @@ const EXTRA_KEYS = [
   "accuracy", "dmgBonus", "dmgResist", "healBonus", "monsterDmg", "monsterResist",
   "effectHit", "effectResist", "mastery", "elemResist", "physMastery", "physResist",
   "flatDmgAdd", "blockIgnore", "blockIgnoreRating", "critPowerFlat", "elemAffinity",
+  "characterDmg",
 ];
 
 function recommendProfile(source, detail, arena) {
@@ -63,6 +64,137 @@ function recommendProfile(source, detail, arena) {
     next.bless = { wind: 0, water: 0, fire: 0, light: 0, dark: 0 };
   }
   return next;
+}
+
+const EXTRA_STAT_FIELDS = [
+  ["치명타율", "critRate"],
+  ["치명타대미지", "critDmg"],
+  ["치명타피해", "critDmg"],
+  ["치명피해", "critDmg"],
+  ["치명타저항", "critResist"],
+  ["치명타수치", "critRating"],
+  ["치명수치", "critRating"],
+  ["막기율", "block"],
+  ["막기대미지저항", "blockDmgResist"],
+  ["막기무시", "blockIgnore"],
+  ["막기무시율", "blockIgnore"],
+  ["명중", "accuracy"],
+  ["대미지보너스", "dmgBonus"],
+  ["피해보너스", "dmgBonus"],
+  ["대미지저항", "dmgResist"],
+  ["피해저항", "dmgResist"],
+  ["치유보너스", "healBonus"],
+  ["몬스터대미지증가", "monsterDmg"],
+  ["몬스터대미지", "monsterDmg"],
+  ["캐릭터대미지증가", "characterDmg"],
+  ["캐릭터대미지", "characterDmg"],
+  ["캐릭터피해증가", "characterDmg"],
+  ["몬스터대미지저항", "monsterResist"],
+  ["효과적중", "effectHit"],
+  ["효과저항", "effectResist"],
+  ["원소마스터리", "mastery"],
+  ["마스터리", "mastery"],
+  ["원소저항", "elemResist"],
+  ["물리마스터리", "physMastery"],
+  ["물리저항", "physResist"],
+  ["고정피해", "flatDmgAdd"],
+  ["고정피해추가", "flatDmgAdd"],
+  ["고정대미지", "flatDmgAdd"],
+  ["공격", "atk"],
+  ["공격력", "atk"],
+  ["방어", "def"],
+  ["방어력", "def"],
+  ["생명", "hp"],
+  ["생명력", "hp"],
+  ["속도", "speed"],
+  ["회피", "dodge"],
+  ["회피율", "dodge"],
+  ["레벨", "level"],
+  ["바람원소친화", "elem.wind"],
+  ["바람친화", "elem.wind"],
+  ["물원소친화", "elem.water"],
+  ["물친화", "elem.water"],
+  ["불원소친화", "elem.fire"],
+  ["불친화", "elem.fire"],
+  ["빛원소친화", "elem.light"],
+  ["빛친화", "elem.light"],
+  ["어둠원소친화", "elem.dark"],
+  ["어둠친화", "elem.dark"],
+  ["바람원소가호", "bless.wind"],
+  ["바람가호", "bless.wind"],
+  ["물원소가호", "bless.water"],
+  ["물가호", "bless.water"],
+  ["불원소가호", "bless.fire"],
+  ["불가호", "bless.fire"],
+  ["빛원소가호", "bless.light"],
+  ["빛가호", "bless.light"],
+  ["어둠원소가호", "bless.dark"],
+  ["어둠가호", "bless.dark"],
+];
+
+function matchExtra(name) {
+  const key = String(name || "").replace(/\s+/g, "").replace(/%/g, "");
+  return EXTRA_STAT_FIELDS.find(([label]) => label === key)?.[1] || "";
+}
+
+function withExtras(source, extraRows = source?.extraStats) {
+  const next = {
+    ...source,
+    elem: { ...source.elem },
+    bless: { ...source.bless },
+  };
+  for (const row of extraRows || []) {
+    const field = matchExtra(row?.name);
+    if (!field || row.value === "" || row.value == null) continue;
+    const value = Number(row.value);
+    if (!Number.isFinite(value)) continue;
+    if (field.startsWith("elem.") || field.startsWith("bless.")) {
+      const [group, key] = field.split(".");
+      next[group][key] = (Number(next[group][key]) || 0) + value;
+    } else {
+      next[field] = (Number(next[field]) || 0) + value;
+    }
+    if (field === "flatDmgAdd") next.flatDmgOn = true;
+  }
+  return next;
+}
+
+function damageTotal(extraRows) {
+  const base = withExtras(profile.value, extraRows);
+  const sides = [
+    recommendProfile(base, pveDetail.value, true),
+    recommendProfile(base, pvpDetail.value, false),
+  ];
+  return sides.reduce((sum, shaped) => (
+    sum + evaluateChain(shaped).reduce((part, row) => part + (row.expected || 0), 0)
+  ), 0);
+}
+
+function publishExtras(next) {
+  const before = Math.round(damageTotal(profile.value.extraStats || []));
+  const after = Math.round(damageTotal(next));
+  profile.value.extraStats = next;
+  if (before !== after) {
+    const loadouts = { ...(profile.value.loadouts || {}) };
+    delete loadouts[profile.value.classId];
+    profile.value.loadouts = loadouts;
+    swap.value = null;
+    closePopup();
+  }
+}
+
+function addExtraStat() {
+  const list = Array.isArray(profile.value.extraStats) ? profile.value.extraStats : [];
+  profile.value.extraStats = [...list, { id: crypto.randomUUID(), name: "", value: "" }];
+}
+
+function commitExtra(id, patch) {
+  const next = (profile.value.extraStats || []).map((row) => (row.id === id ? { ...row, ...patch } : row));
+  publishExtras(next);
+}
+
+function removeExtra(id) {
+  publishExtras((profile.value.extraStats || []).filter((row) => row.id !== id));
 }
 
 function clampLevel(value, fallback = 1) {
@@ -100,11 +232,16 @@ function evaluateChain(shaped) {
   );
 }
 
-const catalogRows = computed(() => evaluateChain(profile.value));
-const pveProfile = computed(() => recommendProfile(profile.value, pveDetail.value, true));
-const pvpProfile = computed(() => recommendProfile(profile.value, pvpDetail.value, false));
-const pveRows = computed(() => evaluateChain(pveProfile.value));
-const pvpRows = computed(() => evaluateChain(pvpProfile.value));
+const catalogRows = computed(() => evaluateChain(withExtras(profile.value)));
+const pveProfile = computed(() => recommendProfile(withExtras(profile.value), pveDetail.value, true));
+const pvpProfile = computed(() => recommendProfile(withExtras(profile.value), pvpDetail.value, false));
+function held(list) {
+  const missing = profile.value.unowned || {};
+  return list.filter((row) => !missing[row.skill.id]);
+}
+
+const pveRows = computed(() => held(evaluateChain(pveProfile.value)));
+const pvpRows = computed(() => held(evaluateChain(pvpProfile.value)));
 
 const best = computed(() => {
   const klass = findClass(profile.value.classId);
@@ -172,9 +309,12 @@ function savedIds(mode, kind) {
 function buildSlots(mode, kind, recommended, sourceRows) {
   const overrides = savedIds(mode, kind);
   const pool = sourceRows?.length ? sourceRows : recommended;
-  const findRow = (id) => pool.find((row) => row.skill.id === id && row.skill.kind === kind)
-    || catalogRows.value.find((row) => row.skill.id === id && row.skill.kind === kind)
-    || null;
+  const findRow = (id) => {
+    if (profile.value.unowned?.[id]) return null;
+    return pool.find((row) => row.skill.id === id && row.skill.kind === kind)
+      || catalogRows.value.find((row) => row.skill.id === id && row.skill.kind === kind)
+      || null;
+  };
   const pinnedIds = new Set(overrides.filter((id) => findRow(id)));
   const free = recommended.filter((row) => !pinnedIds.has(row.skill.id));
   let cursor = 0;
@@ -312,6 +452,13 @@ function setTier(tier) {
 
 function setRank(skillId, rank) {
   profile.value.ranks[skillId] = Number(rank);
+}
+
+function setUnowned(skillId, on) {
+  const next = { ...(profile.value.unowned || {}) };
+  if (on) next[skillId] = true;
+  else delete next[skillId];
+  profile.value.unowned = next;
 }
 
 function setBoardLevel(kind, index, level) {
@@ -638,7 +785,10 @@ async function dropProfile(id) {
       <label class="field"><span>방어</span><input v-model.number="profile.def" type="number" min="0" /></label>
       <label class="field"><span>생명</span><input v-model.number="profile.hp" type="number" min="0" /></label>
       <label class="field"><span>속도</span><input v-model.number="profile.speed" type="number" min="0" /></label>
-      <p class="stat-group">기타 속성</p>
+      <div class="stat-group stat-head">
+        <span>기타 속성</span>
+        <button type="button" class="add-stat" @click="addExtraStat">항목 추가</button>
+      </div>
       <label class="field"><span>치명타율 %</span><input v-model.number="profile.critRate" type="number" /></label>
       <label class="field"><span>치명타 대미지 %</span><input v-model.number="profile.critDmg" type="number" /></label>
       <label class="field"><span>치명타 저항 %</span><input v-model.number="profile.critResist" type="number" /></label>
@@ -668,6 +818,25 @@ async function dropProfile(id) {
           @input="profile.flatDmgAdd = $event.target.value === '' ? '' : Number($event.target.value)"
         />
       </div>
+      <div v-for="row in profile.extraStats || []" :key="row.id" class="field extra-stat">
+        <span class="extra-name">
+          <input
+            :value="row.name"
+            type="text"
+            placeholder="항목"
+            aria-label="추가 항목 이름"
+            @change="commitExtra(row.id, { name: $event.target.value })"
+          />
+          <button type="button" class="extra-x" aria-label="항목 삭제" @click="removeExtra(row.id)">×</button>
+        </span>
+        <input
+          :value="row.value"
+          type="number"
+          placeholder="수치"
+          aria-label="추가 항목 수치"
+          @change="commitExtra(row.id, { value: $event.target.value })"
+        />
+      </div>
       <p class="stat-group">세부</p>
       <label class="field"><span>바람 원소 친화</span><input v-model.number="profile.elem.wind" type="number" min="0" /></label>
       <label class="field"><span>물 원소 친화</span><input v-model.number="profile.elem.water" type="number" min="0" /></label>
@@ -691,7 +860,7 @@ async function dropProfile(id) {
       </div>
       <template v-if="detailTab === 'recommend'">
       <div class="recommend-toolbar">
-        <p class="recommend-lead">※ 스킬 상세 정보에서 스킬 정보를 등록하지 않는 경우 전설+0 &amp; 레벨 100으로 고정되어 추천됩니다. </p>
+        <p class="recommend-lead">※ 스킬 상세 정보에서 스킬 정보를 등록하지 않는 경우 전설+0 &amp; 레벨 100으로 고정되어 추천됩니다. </p> 
         <div class="recommend-follow">
           <p>※ 상세 정보 등록 후 "재 추천" 버튼을 누르면 다시 추천을 진행합니다.</p>
           <button type="button" class="rerecommend" @click="recommendAgain">재 추천</button>
@@ -893,6 +1062,15 @@ async function dropProfile(id) {
             >
               <div class="meta" @click.stop>
                 <span>{{ row.skill.kind === "Technique" ? "기술" : "특성" }}</span>
+                <label class="own-check">
+                  <input
+                    type="checkbox"
+                    :checked="Boolean(profile.unowned?.[row.skill.id])"
+                    :aria-label="`${row.skill.name} 미보유`"
+                    @change="setUnowned(row.skill.id, $event.target.checked)"
+                  />
+                  미보유
+                </label>
                 <select :value="profile.ranks[row.skill.id] || BASIS_RANK" :aria-label="`${row.skill.name} 등급`" @change="setRank(row.skill.id, $event.target.value)">
                   <option v-for="rank in 34" :key="rank" :value="rank">{{ rankLabel(rank) }}</option>
                 </select>
