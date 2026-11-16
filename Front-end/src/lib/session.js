@@ -2,12 +2,18 @@ import { ref } from "vue";
 
 export const account = ref(null);
 
+const apiBase = String(import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+
+function apiUrl(path) {
+  return `${apiBase}${path}`;
+}
+
 async function request(url, { method = "GET", body } = {}) {
   let response;
   try {
-    response = await fetch(url, {
+    response = await fetch(apiUrl(url), {
       method,
-      credentials: "same-origin",
+      credentials: apiBase ? "include" : "same-origin",
       headers: body ? { "Content-Type": "application/json" } : undefined,
       body: body ? JSON.stringify(body) : undefined,
     });
@@ -87,7 +93,10 @@ export function moveRoster(move) {
 export async function deleteProfile(id) {
   let response;
   try {
-    response = await fetch(`/api/profiles/${id}`, { method: "DELETE", credentials: "same-origin" });
+    response = await fetch(apiUrl(`/api/profiles/${id}`), {
+      method: "DELETE",
+      credentials: apiBase ? "include" : "same-origin",
+    });
   } catch {
     throw new Error("서버에 연결하지 못했습니다.");
   }

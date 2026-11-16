@@ -5,6 +5,19 @@ import { getPool, mapDbError } from "./db.js";
 import { BOARD_ROLES, parsePower } from "./roster.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ALLOWED_ORIGINS = new Set([
+  "https://sscat.guild-site.workers.dev",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+]);
+
+function applyCors(req, res) {
+  const origin = String(req.headers.origin || "");
+  if (!ALLOWED_ORIGINS.has(origin)) return;
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Vary", "Origin");
+}
 
 function send(res, status, body, headers = {}) {
   const payload = body == null ? "" : JSON.stringify(body);
@@ -486,6 +499,15 @@ async function handle(req, res) {
   const url = new URL(req.url || "/", "http://127.0.0.1");
   const path = url.pathname;
   const method = req.method || "GET";
+  applyCors(req, res);
+
+  if (method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.writeHead(204);
+    res.end();
+    return;
+  }
 
   if (method === "POST" && path === "/api/door") {
     send(res, 200, await checkDoor(await readBody(req)));
