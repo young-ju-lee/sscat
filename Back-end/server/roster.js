@@ -5,4 +5,4 @@ export function parsePower(input) {
   if (!match) return 0;
   const number = Number(match[1]) * ({ 만: 10000, 억: 100000000 }[match[2]] || 1);
   return Number.isSafeInteger(number) && number > 0 ? number : 0;
-}
+} 
