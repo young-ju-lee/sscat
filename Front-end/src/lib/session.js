@@ -2,25 +2,59 @@ import { ref } from "vue";
 
 export const account = ref(null);
 
-const apiBase = String(import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+const TOKEN_KEY = "sxs-token";
+const BOARD_KEY = "sxs-board";
+
+function apiBase() {
+  const configured = String(import.meta.env.VITE_API_URL || "").trim().replace(/\/$/, "");
+  if (configured) return configured;
+  if (import.meta.env.DEV) return "";
+  return "https://sscat-api.guild-site.workers.dev";
+}
 
 function apiUrl(path) {
-  return `${apiBase}${path}`;
+  return `${apiBase()}${path}`;
+}
+
+function readStore(key) {
+  try {
+    return sessionStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeStore(key, value) {
+  try {
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+  } catch {
+    /* 저장소를 쓸 수 없어도 이번 요청은 계속합니다. */
+  }
 }
 
 async function request(url, { method = "GET", body } = {}) {
+  const headers = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const token = readStore(TOKEN_KEY);
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const boardId = readStore(BOARD_KEY);
+  if (boardId) headers["X-Board-Id"] = boardId;
+
   let response;
   try {
     response = await fetch(apiUrl(url), {
       method,
-      credentials: apiBase ? "include" : "same-origin",
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
     throw new Error("서버에 연결하지 못했습니다.");
   }
+  if (response.status === 204) return {};
   const data = await response.json().catch(() => ({}));
+  if (data.token) writeStore(TOKEN_KEY, data.token);
+  if (data.boardId) writeStore(BOARD_KEY, data.boardId);
   if (!response.ok) {
     const error = new Error(data.message || "요청에 실패했습니다.");
     error.status = response.status;
@@ -50,6 +84,7 @@ export async function signOut() {
   try {
     await request("/api/auth/logout", { method: "POST", body: {} });
   } finally {
+    writeStore(TOKEN_KEY, "");
     account.value = null;
   }
 }
@@ -91,16 +126,5 @@ export function moveRoster(move) {
 }
 
 export async function deleteProfile(id) {
-  let response;
-  try {
-    response = await fetch(apiUrl(`/api/profiles/${id}`), {
-      method: "DELETE",
-      credentials: apiBase ? "include" : "same-origin",
-    });
-  } catch {
-    throw new Error("서버에 연결하지 못했습니다.");
-  }
-  if (response.status === 204 || response.status === 404) return;
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.message || "스펙 삭제에 실패했습니다.");
+  await request(`/api/profiles/${id}`, { method: "DELETE" });
 }

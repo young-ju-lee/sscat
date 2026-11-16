@@ -1,11 +1,13 @@
 {
   "name": "sscat-api",
   "private": true,
+  "version": "1.0.0",  
   "type": "module",
   "scripts": {
-    "start": "node --env-file=.env server/index.js"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
-  "dependencies": {
-    "pg": "^8.23.1"
+  "devDependencies": {
+    "wrangler": "^4.34.0"
   }
 }
