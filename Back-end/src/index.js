@@ -354,6 +354,71 @@ async function moveRoster(env, ownerId, body) {
   return loadRoster(env, ownerId);
 }
 
+function clampInt(value, min, max, fallback) {
+  const number = Math.round(Number(value));
+  if (!Number.isInteger(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function skillRows(profileId, body) {
+  const ranks = body?.ranks && typeof body.ranks === "object" ? body.ranks : {};
+  const levels = body?.skillLevels && typeof body.skillLevels === "object" ? body.skillLevels : {};
+  const ids = new Set([...Object.keys(ranks), ...Object.keys(levels)]);
+  const updatedAt = new Date().toISOString();
+  const rows = [];
+  for (const key of ids) {
+    const skillId = Number(key);
+    if (!Number.isInteger(skillId) || skillId <= 0) continue;
+    rows.push({
+      profile_id: profileId,
+      skill_id: skillId,
+      rank: clampInt(ranks[key], 1, 34, 6),
+      level: clampInt(levels[key], 1, 200, 100),
+      updated_at: updatedAt,
+    });
+  }
+  return rows;
+}
+
+async function saveProfileSkills(env, profileId, body) {
+  const rows = skillRows(profileId, body);
+  if (rows.length) {
+    await rest(env, "profile_skills?on_conflict=profile_id,skill_id", {
+      method: "POST",
+      prefer: "resolution=merge-duplicates,return=minimal",
+      body: rows,
+    });
+  }
+  const keep = rows.map((row) => row.skill_id).join(",");
+  const path = keep
+    ? `profile_skills?profile_id=eq.${profileId}&skill_id=not.in.(${keep})`
+    : `profile_skills?profile_id=eq.${profileId}`;
+  await rest(env, path, { method: "DELETE", prefer: "return=minimal" });
+}
+
+function applySkillRows(profiles, skills) {
+  const byProfile = new Map();
+  for (const skill of skills || []) {
+    const list = byProfile.get(skill.profile_id) || [];
+    list.push(skill);
+    byProfile.set(skill.profile_id, list);
+  }
+  return (profiles || []).map((profile) => {
+    const list = byProfile.get(profile.id);
+    if (!list?.length) return profile;
+    const payload = { ...(profile.payload || {}) };
+    const ranks = {};
+    const skillLevels = {};
+    for (const skill of list) {
+      ranks[skill.skill_id] = skill.rank;
+      skillLevels[skill.skill_id] = skill.level;
+    }
+    payload.ranks = ranks;
+    payload.skillLevels = skillLevels;
+    return { ...profile, payload };
+  });
+}
+
 async function saveProfile(env, user, body) {
   const id = String(body?.id || "");
   if (!UUID.test(id)) throw httpError(400, "스펙 id가 올바르지 않습니다.");
@@ -374,6 +439,7 @@ async function saveProfile(env, user, body) {
     });
   const saved = rows?.[0];
   if (!saved) throw httpError(404, "이 스펙을 저장할 수 없습니다.");
+  await saveProfileSkills(env, saved.id, body);
   return { id: saved.id, name: saved.name, updatedAt: saved.updated_at };
 }
 
@@ -442,7 +508,16 @@ export default {
       if (request.method === "GET" && pathname === "/api/profiles") {
         const user = await requireUser(env, request);
         const rows = await rest(env, `profiles?user_id=eq.${user.id}&select=id,name,payload,updated_at&order=updated_at.desc`);
-        return json({ profiles: rows || [] }, 200, origin);
+        const ids = (rows || []).map((row) => row.id).filter((profileId) => UUID.test(profileId));
+        let skills = [];
+        if (ids.length) {
+          try {
+            skills = await rest(env, `profile_skills?profile_id=in.(${ids.join(",")})&select=profile_id,skill_id,rank,level`);
+          } catch (error) {
+            if (!/profile_skills|schema cache/i.test(error.message || "")) throw error;
+          }
+        }
+        return json({ profiles: applySkillRows(rows, skills) }, 200, origin);
       }
       if (request.method === "PUT" && pathname === "/api/profiles") {
         const user = await requireUser(env, request);

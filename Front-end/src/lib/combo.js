@@ -26,6 +26,7 @@ export function recommendForClass(rows, profile, line, chain = [], arenas = ["pv
     pve: [
       pack("single", "단일", recommendMode(pveCards, line, "single"), true),
       pack("aoe", "광역", recommendMode(pveCards, line, "aoe"), true),
+      pack("any", "종합", recommendMode(pveCards, line, "any"), true),
     ],
     pvp: pvpRoles(line)
       .map((role) => pack(role.id, role.label, recommendRole(pvpCards, line, role), false))
@@ -45,8 +46,11 @@ function recommendMode(cards, line, mode) {
   const charms = usable.filter((card) => card.kind === "Charm");
   const techPool = techniquePool(techniques);
   const charmPool = charmPoolOf(charms, techPool);
-  const best = searchLine(line, techPool, charmPool) || search(techPool, charmPool);
-  if (!best) return { techniques: [], charms: [], healing: [], total: 0 };
+  const open = search(techPool, charmPool);
+  const themed = line === "burst" ? searchBurst(techPool, charmPool) : null;
+  const seed = higher(open, themed);
+  if (!seed) return { techniques: [], charms: [], healing: [], total: 0 };
+  const best = refine(seed, techniques, charms);
   const techSet = fillCards(best.techSet, cards.filter((card) => card.kind === "Technique"), modeMatch(mode));
   const charmSet = fillCards(best.charmSet, cards.filter((card) => card.kind === "Charm"));
   const pack = bonuses(techSet, charmSet);
@@ -251,64 +255,57 @@ export function scoreCombo(profile, techniques, charms, arena = profile.pve !== 
   return scoreSet(techCards, charmCards).total;
 }
 
-function searchLine(line, techs, charms) {
-  if (line === "burst") {
-    const harmony = charms.find((card) => card.perElement);
-    if (!harmony) return null;
-    return search(techs, charms, (set) => elementCount(set) >= 3, (set) => set.includes(harmony));
-  }
-  if (line === "support") {
-    const erosion = charms.find((card) => card.inflictsErosion);
-    const soul = charms.find((card) => card.soul);
-    const dark = search(
-      techs,
-      charms,
-      (set) => set.filter((card) => card.elements.includes("dark")).length >= Math.min(2, set.length),
-      (set) => !erosion || set.includes(erosion),
-    );
-    const summoned = soul
-      ? search(techs, charms, (set) => set.some((card) => card.summon), (set) => set.includes(soul))
-      : null;
-    return better(dark, summoned);
-  }
-  if (line === "guard") {
-    const counter = charms.find((card) => card.blocks);
-    const breaker = charms.find((card) => card.shieldBreak);
-    const reflected = counter
-      ? search(
-        techs,
-        charms,
-        (set) => set.some((card) => card.blockRate > 0),
-        (set) => set.includes(counter),
-      )
-      : null;
-    const smashed = breaker
-      ? search(
-        techs,
-        charms,
-        (set) => set.some((card) => card.shield),
-        (set) => set.includes(breaker),
-      )
-      : null;
-    return better(reflected, smashed);
-  }
-  if (line === "duel") {
-    const leap = techs.find((card) => card.armorBreak);
-    const mark = charms.find((card) => card.mark);
-    return search(
-      techs,
-      charms,
-      (set) => !leap || set.includes(leap),
-      (set) => !mark || set.includes(mark),
-    );
-  }
-  return null;
+function searchBurst(techs, charms) {
+  if (!charms.some((card) => card.perElement)) return null;
+  return search(
+    techs,
+    charms,
+    (set) => elementCount(set) >= 3,
+    (set) => set.some((card) => card.perElement),
+  );
 }
 
-function better(left, right) {
+function higher(left, right) {
   if (!left) return right;
   if (!right) return left;
   return right.total > left.total ? right : left;
+}
+
+function refine(seed, techs, charms) {
+  let techSet = seed.techSet.slice();
+  let charmSet = seed.charmSet.slice();
+  let best = scoreSet(techSet, charmSet);
+  let moved = true;
+  while (moved) {
+    moved = false;
+    for (const card of techs) {
+      if (techSet.some((item) => item.id === card.id)) continue;
+      for (let index = 0; index < techSet.length; index += 1) {
+        const next = techSet.slice();
+        next[index] = card;
+        const scored = scoreSet(next, charmSet);
+        if (scored.total > best.total + 1e-6) {
+          techSet = next;
+          best = scored;
+          moved = true;
+        }
+      }
+    }
+    for (const card of charms) {
+      if (charmSet.some((item) => item.id === card.id)) continue;
+      for (let index = 0; index < charmSet.length; index += 1) {
+        const next = charmSet.slice();
+        next[index] = card;
+        const scored = scoreSet(techSet, next);
+        if (scored.total > best.total + 1e-6) {
+          charmSet = next;
+          best = scored;
+          moved = true;
+        }
+      }
+    }
+  }
+  return { ...best, techSet, charmSet };
 }
 
 function elementCount(techs) {
@@ -322,7 +319,8 @@ function search(techPool, charmPool, techOk = () => true, charmOk = () => true, 
     combine(charmPool, (charmSet) => {
       if (!charmOk(charmSet)) return;
       const scored = adjust(scoreSet(techSet, charmSet), techSet, charmSet);
-      const betterScore = !best || scored.total > best.total + 0.5 || (scored.total > best.total - 0.5 && scored.weight > best.weight);
+      const ahead = best ? scored.total - best.total : 1;
+      const betterScore = !best || ahead > 1e-6 || (Math.abs(ahead) <= 1e-6 && scored.weight > best.weight);
       if (betterScore) best = { total: scored.total, weight: scored.weight, techSet, charmSet, parts: scored.parts };
     });
   });

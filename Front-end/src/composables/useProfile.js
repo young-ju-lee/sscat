@@ -15,9 +15,13 @@ export function defaultProfile() {
     realm: "Silver3",
     level: 100,
     skillLevel: 100,
-    rank: 10,
+    rank: 6,
+    recommendReady: false,
+    recommendRanks: {},
+    recommendLevels: {},
     ranks: {},
     skillLevels: {},
+    boardLevels: { techniques: [100, 100, 100, 100], charms: [100, 100, 100, 100] },
     loadouts: {},
     atk: 50000,
     def: 0,
@@ -79,6 +83,22 @@ function readProfiles() {
   }
 }
 
+function clampLevel(value, fallback) {
+  const number = Math.round(Number(value));
+  if (!number) return fallback;
+  return Math.min(200, Math.max(1, number));
+}
+
+function boardLevelsOf(raw) {
+  const fallback = clampLevel(raw.skillLevel, 100);
+  const source = raw.boardLevels || {};
+  const read = (list) => Array.from({ length: 4 }, (_, index) => clampLevel(list?.[index], fallback));
+  return {
+    techniques: read(source.techniques),
+    charms: read(source.charms),
+  };
+}
+
 function fillProfile(raw) {
   const base = defaultProfile();
   const path = inferPath(raw.classId || base.classId);
@@ -95,6 +115,7 @@ function fillProfile(raw) {
     classId: resolveClass(job, branch, classTier),
     ranks: raw.ranks || {},
     skillLevels: raw.skillLevels || {},
+    boardLevels: boardLevelsOf(raw),
     loadouts: raw.loadouts || {},
     elem: { ...base.elem, ...(raw.elem || {}) },
     bless: { ...base.bless, ...(raw.bless || {}) },
@@ -134,6 +155,15 @@ export function useProfile() {
     const copy = JSON.parse(JSON.stringify(profile.value));
     copy.id = crypto.randomUUID();
     copy.name = name.trim() || "새 스펙";
+    copy.rank = 6;
+    copy.skillLevel = 100;
+    copy.ranks = {};
+    copy.skillLevels = {};
+    copy.boardLevels = { techniques: [100, 100, 100, 100], charms: [100, 100, 100, 100] };
+    copy.recommendReady = false;
+    copy.recommendRanks = {};
+    copy.recommendLevels = {};
+    copy.loadouts = {};
     profiles.value.push(copy);
     activeId.value = copy.id;
   }

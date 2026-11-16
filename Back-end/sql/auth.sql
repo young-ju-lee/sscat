@@ -34,6 +34,20 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 CREATE INDEX IF NOT EXISTS profiles_user_id_idx ON profiles (user_id);
 
+-- 스킬 상세 정보에 입력한 등급과 레벨. 한 스펙의 스킬마다 한 줄입니다.
+CREATE TABLE IF NOT EXISTS profile_skills (
+  profile_id uuid NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+  skill_id   integer NOT NULL,
+  rank       smallint NOT NULL,
+  level      smallint NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (profile_id, skill_id),
+  CONSTRAINT profile_skills_rank_check CHECK (rank BETWEEN 1 AND 34),
+  CONSTRAINT profile_skills_level_check CHECK (level BETWEEN 1 AND 200)
+);
+
+CREATE INDEX IF NOT EXISTS profile_skills_profile_id_idx ON profile_skills (profile_id);
+
 CREATE TABLE IF NOT EXISTS auth_code (
   id   text PRIMARY KEY,
   code text NOT NULL
@@ -126,7 +140,7 @@ SET search_path = public, extensions
 AS $$ SELECT stored = crypt(plain, stored); $$;
 
 -- Worker는 서비스 키로 REST를 호출합니다. 브라우저용 anon 키에는 표를 열지 않습니다.
-GRANT SELECT, INSERT, UPDATE, DELETE ON users, sessions, profiles, auth_code, roster TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON users, sessions, profiles, auth_code, roster, profile_skills TO service_role;
 REVOKE ALL ON FUNCTION hash_password(text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION password_matches(text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION hash_password(text) TO service_role;

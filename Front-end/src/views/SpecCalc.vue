@@ -2,13 +2,15 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { JOBS, branchesFor, classLabel, findClass, resolveClass, tierChoices } from "../data/classes.js";
 import { REALMS, evaluateSkill, rankLabel, skillsForClass } from "../lib/combat.js";
-import { recommendForClass, scoreCombo } from "../lib/combo.js";
+import { recommendForClass, scoreCombo, techniqueTarget } from "../lib/combo.js";
 import { QUALITIES } from "../lib/skillValue.js";
 import { useProfile } from "../composables/useProfile.js";
 import { account, deleteProfile, saveProfile } from "../lib/session.js";
 import skillTiers from "../data/skillTiers.json" with { type: "json" };
 
 const QUALITY_LABEL = { Blue: "희귀", Purple: "영웅", Orange: "전설" };
+const BASIS_RANK = 6;
+const BASIS_LEVEL = 100;
 const GRADE_CLASS = { "S+": "splus", S: "s", A: "a", B: "b", C: "c", D: "d", F: "f" };
 
 const { profiles, profile, selectProfile, saveAs, removeProfile } = useProfile();
@@ -22,7 +24,6 @@ const pvpDetail = ref(false);
 const swap = ref(null);
 const pickerPrior = ref(false);
 const draftRank = ref(profile.value.rank);
-const draftLevel = ref(profile.value.skillLevel);
 let popupAnchor = null;
 let dragged = false;
 const editNote = ref("");
@@ -31,13 +32,13 @@ let editTimer = 0;
 
 const rows = computed(() => {
   const current = profile.value;
-  return skillsForClass(current.classId)
-    .filter((skill) => skill.classId === current.classId)
-    .map((skill) => {
-      const rank = current.ranks[skill.id] || current.rank;
-      const level = current.skillLevels[skill.id] || current.skillLevel;
+  return findClass(current.classId).chain.flatMap((classId) =>
+    skillsForClass(classId).map((skill) => {
+      const rank = current.ranks[skill.id] || BASIS_RANK;
+      const level = current.skillLevels[skill.id] || BASIS_LEVEL;
       return evaluateSkill(skill, rank, level, current.realm, current, current.pve);
-    });
+    })
+  );
 });
 
 const EXTRA_KEYS = [
@@ -64,12 +65,38 @@ function recommendProfile(source, detail, arena) {
   return next;
 }
 
+function clampLevel(value, fallback = 1) {
+  const number = Math.round(Number(value));
+  if (!number) return fallback;
+  return Math.min(200, Math.max(1, number));
+}
+
+function boardMax(source) {
+  const board = source?.boardLevels || {};
+  const values = [...(board.techniques || []), ...(board.charms || [])]
+    .map((value) => Number(value))
+    .filter((value) => value > 0);
+  const fallback = clampLevel(source?.skillLevel, BASIS_LEVEL);
+  return values.length ? clampLevel(Math.max(...values), fallback) : fallback;
+}
+
+function skillBasis(shaped, skillId) {
+  const level = boardMax(shaped);
+  if (!shaped.recommendReady) return { rank: BASIS_RANK, level };
+  const rank = Number(shaped.recommendRanks?.[skillId]);
+  return {
+    rank: rank > 0 ? rank : BASIS_RANK,
+    level,
+  };
+}
+
 function evaluateChain(shaped) {
   const chain = findClass(shaped.classId).chain;
   return chain.flatMap((classId) =>
-    skillsForClass(classId).map((skill) =>
-      evaluateSkill(skill, shaped.rank, shaped.skillLevel, shaped.realm, shaped, shaped.pve)
-    )
+    skillsForClass(classId).map((skill) => {
+      const basis = skillBasis(shaped, skill.id);
+      return evaluateSkill(skill, basis.rank, basis.level, shaped.realm, shaped, shaped.pve);
+    })
   );
 }
 
@@ -111,16 +138,29 @@ const groups = computed(() => {
       rows: buckets.get(id),
     }));
 });
+const openGroups = ref({});
+
+function groupOpen(id) {
+  const stored = openGroups.value[id];
+  if (stored === undefined) return id === profile.value.classId;
+  return stored;
+}
+
+function toggleGroup(id) {
+  openGroups.value = { ...openGroups.value, [id]: !groupOpen(id) };
+}
 
 watch(() => profile.value.id, () => {
   draftRank.value = profile.value.rank;
-  draftLevel.value = profile.value.skillLevel;
   swap.value = null;
 });
 
-watch(() => profile.value.classId, () => {
+watch(() => profile.value.classId, (id) => {
   swap.value = null;
-});
+  const next = {};
+  for (const group of groups.value) next[group.id] = group.id === id;
+  openGroups.value = next;
+}, { immediate: true });
 
 function savedIds(mode, kind) {
   const key = kind === "Technique" ? "techniques" : "charms";
@@ -147,8 +187,7 @@ function buildSlots(mode, kind, recommended, sourceRows) {
 }
 
 const recommendGroups = computed(() => [
-  ["PVE", best.value.pve, pveProfile.value],
-  ["PVP", best.value.pvp, pvpProfile.value],
+  ["PVE", best.value.pve, pveProfile.value]
 ].map(([title, rows, shaped]) => ({
   title,
   sets: (rows || []).map((picked) => {
@@ -163,6 +202,13 @@ const recommendGroups = computed(() => [
     return { id: picked.id, label: picked.label, arena: picked.arena, techniques, charms, pinned, shown, delta: shown - base };
   }),
 })));
+
+const boardView = computed(() => {
+  const board = profile.value.boardLevels || {};
+  const fallback = clampLevel(profile.value.skillLevel, BASIS_LEVEL);
+  const read = (list) => Array.from({ length: 4 }, (_, index) => clampLevel(list?.[index], fallback));
+  return { techniques: read(board.techniques), charms: read(board.charms) };
+});
 
 const pickerSkills = computed(() => {
   const slot = swap.value;
@@ -180,6 +226,11 @@ const pickerSkills = computed(() => {
   const source = set.arena === false ? pvpRows.value : pveRows.value;
   return source
     .filter((row) => classIds.includes(row.skill.classId) && tierIds.has(row.skill.id) && row.skill.kind === slot.kind && !used.has(row.skill.id))
+    .filter((row) => {
+      if (slot.kind !== "Technique" || slot.mode === "any") return true;
+      const target = techniqueTarget(row.skill);
+      return target === "either" || target === slot.mode;
+    })
     .sort((a, b) => (b.expected - a.expected) || (b.heal - a.heal));
 });
 
@@ -263,38 +314,47 @@ function setRank(skillId, rank) {
   profile.value.ranks[skillId] = Number(rank);
 }
 
-function setSkillLevel(skillId, level) {
-  profile.value.skillLevels[skillId] = Number(level);
+function setBoardLevel(kind, index, level) {
+  const board = profile.value.boardLevels || { techniques: [], charms: [] };
+  const next = {
+    techniques: Array.from({ length: 4 }, (_, slot) => clampLevel(board.techniques?.[slot], profile.value.skillLevel || BASIS_LEVEL)),
+    charms: Array.from({ length: 4 }, (_, slot) => clampLevel(board.charms?.[slot], profile.value.skillLevel || BASIS_LEVEL)),
+  };
+  next[kind][index] = clampLevel(level);
+  profile.value.boardLevels = next;
+}
+
+function stampBoardLevel() {
+  const level = boardMax(profile.value);
+  profile.value.skillLevel = level;
+  const levels = { ...profile.value.skillLevels };
+  for (const row of rows.value) levels[row.skill.id] = level;
+  profile.value.skillLevels = levels;
+  return level;
+}
+
+function recommendAgain() {
+  const level = boardMax(profile.value);
+  const levels = {};
+  for (const row of rows.value) levels[row.skill.id] = level;
+  profile.value.recommendRanks = { ...profile.value.ranks };
+  profile.value.recommendLevels = levels;
+  profile.value.recommendReady = true;
+  const loadouts = { ...(profile.value.loadouts || {}) };
+  delete loadouts[profile.value.classId];
+  profile.value.loadouts = loadouts;
+  swap.value = null;
+  closePopup();
 }
 
 function applyAll() {
-  const level = Math.min(200, Math.max(1, Math.round(Number(draftLevel.value) || 1)));
-  draftLevel.value = level;
-  profile.value.skillLevel = level;
-  applyQuality(draftRank.value);
-}
-
-watch(() => profile.value.skillLevel, (level) => {
-  const next = Number(level);
-  if (!next) return;
-  const levels = { ...profile.value.skillLevels };
-  let changed = false;
-  for (const row of rows.value) {
-    if (levels[row.skill.id] !== next) {
-      levels[row.skill.id] = next;
-      changed = true;
-    }
-  }
-  if (changed) profile.value.skillLevels = levels;
-});
-
-function applyQuality(rank) {
-  profile.value.rank = rank;
+  profile.value.rank = draftRank.value;
+  const level = stampBoardLevel();
   const ranks = { ...profile.value.ranks };
   const levels = { ...profile.value.skillLevels };
   for (const row of rows.value) {
-    ranks[row.skill.id] = rank;
-    levels[row.skill.id] = Number(profile.value.skillLevel);
+    ranks[row.skill.id] = draftRank.value;
+    levels[row.skill.id] = level;
   }
   profile.value.ranks = ranks;
   profile.value.skillLevels = levels;
@@ -477,6 +537,7 @@ function showEditNote(message, isError) {
 }
 
 async function updateCurrent() {
+  stampBoardLevel();
   localStorage.setItem("sxs-profiles-v1", JSON.stringify(profiles.value));
   if (!account.value) {
     showEditNote("로그인해야 DB에 저장됩니다.", true);
@@ -512,13 +573,9 @@ async function dropProfile(id) {
 <template>
   <header>
     <div class="title-line">
-      <h1 class="page-title">스펙 계산</h1>
-      <p v-if="account" class="guest-note">로그인한 계정입니다. 스펙 저장을 누르면 이 스펙이 DB에 남습니다.</p>
-      <p v-else class="guest-note">※ 게스트로 생성된 데이터는 디바이스 또는 브라우저 변경 시 유지되지 않습니다.</p>
+      <h1 class="page-title">스펙 계산</h1>      
     </div>
-    <p class="lede">
-      저장한 스펙은 위쪽 탭에 쌓입니다. 추천은 그 스펙의 공격 수치와, 스킬셋에 적어 둔 티어·레벨로 계산한 평균 피해가 높은 순입니다.
-    </p>
+    <p v-if="!account" class="guest-note intro-note">※ 게스트로 생성된 데이터는 디바이스 또는 브라우저 변경 시 유지되지 않습니다.</p>
   </header>
 
   <div class="tabs" role="tablist" aria-label="저장된 스펙">
@@ -632,30 +689,14 @@ async function dropProfile(id) {
           <button type="button" role="tab" :class="{ on: detailTab === 'skills' }" :aria-selected="detailTab === 'skills'" @click="detailTab = 'skills'">스킬 상세 정보</button>
         </div>
       </div>
-      <div class="quality-row">
-        <div class="quality-main">
-          <span>전체 등급</span>
-          <button
-            v-for="quality in QUALITIES"
-            :key="quality.id"
-            type="button"
-            class="qbtn"
-            :class="{ on: draftRank === quality.rank }"
-            @click="draftRank = quality.rank"
-          >
-            {{ quality.name }}
-          </button>
-          <div class="level-apply">
-            <label class="level-pick">
-              <span>스킬 레벨</span>
-              <input v-model.number="draftLevel" type="number" min="1" max="200" aria-label="스킬 레벨" />
-            </label>
-            <button type="button" class="apply-all" @click="applyAll">일괄 적용</button>
-          </div>
+      <template v-if="detailTab === 'recommend'">
+      <div class="recommend-toolbar">
+        <p class="recommend-lead">※ 스킬 상세 정보에서 스킬 정보를 등록하지 않는 경우 전설+0 &amp; 레벨 100으로 고정되어 추천됩니다. </p>
+        <div class="recommend-follow">
+          <p>※ 상세 정보 등록 후 "재 추천" 버튼을 누르면 다시 추천을 진행합니다.</p>
+          <button type="button" class="rerecommend" @click="recommendAgain">재 추천</button>
         </div>
       </div>
-      <p class="skill-note">고정 수치는 스킬 레벨과 왼쪽 랭크가 함께 정하고, 계수(%)는 등급만 따라갑니다. 일괄적용을 눌러야 추천에 반영됩니다.</p>
-      <template v-if="detailTab === 'recommend'">
       <section v-for="group in recommendGroups" :key="group.title" class="recommend-group" :class="{ lead: group.title === 'PVE' }">
       <div class="play-head">
         <h3 class="play-title">{{ group.title }}</h3>
@@ -740,7 +781,8 @@ async function dropProfile(id) {
         </div>
       </section>
       </section>
-      <p class="skill-note">PVE는 단일과 광역으로 나눕니다. PVP는 이 직업이 살릴 수 있는 역할로 나눕니다. 칸을 누르면 그 칸을 바꿀 스킬이 열립니다. 기술 4칸은 같은 줄에서만 끌어 순서를 바꿀 수 있고, 단일 기술은 광역 줄로 옮길 수 없습니다.</p>
+      <p class="skill-note">PVE는 단일, 광역, 종합으로 나눕니다. 종합은 단일과 광역을 함께 넣어 기대 피해가 가장 높은 조합입니다.</p>
+      <p class="skill-note">칸을 누르면 그 칸을 바꿀 스킬이 열립니다. 기술 4칸은 같은 줄에서만 끌어 순서를 바꿀 수 있습니다.</p>
       <div class="tier-heading">
         <h3>티어</h3>
       </div>
@@ -751,13 +793,10 @@ async function dropProfile(id) {
           <span>{{ group.skills.length }}개</span>
         </h3>
         <div class="tier-grid">
-          <button
+          <div
             v-for="skill in group.skills"
             :key="skill.id"
-            type="button"
             class="tier-card"
-            :class="{ current: popupId === skill.id }"
-            @click="openSkill(skill.id, $event)"
           >
             <span class="tier-icon">
               <img :src="skill.skill.icon" :alt="skill.skill.name" width="56" height="56" draggable="false" />
@@ -768,14 +807,83 @@ async function dropProfile(id) {
               <em :class="skill.kind === 'Technique' ? 'tech' : 'charm'">{{ skill.kind === "Technique" ? "기술" : "특성" }}</em>
               <em :class="skill.quality.toLowerCase()">{{ QUALITY_LABEL[skill.quality] }}</em>
             </span>
-          </button>
+          </div>
         </div>
       </section>
       </template>
       <template v-if="detailTab === 'skills'">
+      <div class="quality-row">
+        <div class="quality-main">
+          <span>전체 등급</span>
+          <button
+            v-for="quality in QUALITIES"
+            :key="quality.id"
+            type="button"
+            class="qbtn"
+            :class="{ on: draftRank === quality.rank }"
+            @click="draftRank = quality.rank"
+          >
+            {{ quality.name }}
+          </button>
+          <button type="button" class="apply-all" @click="applyAll">일괄 적용</button>
+        </div>
+      </div>
+      <p class="skill-note">고정 수치는 스킬 레벨과 등급이 함께 정하고, 계수(%)는 등급만 따라갑니다.</p>
+      <p class="skill-note">일괄 적용 시 아래 표에 입력한 최고 레벨과 선택한 등급이 일괄 적용됩니다.</p>
+      <p class="skill-note">"스펙 저장" 버튼을 통해 등록한 뒤 추천 스킬 탭의 "재 추 천" 버튼을 누르면 그 수치로 다시 계산합니다.</p>
+      <div class="level-board">
+        <p>기술</p>
+        <p>특성</p>
+        <table>
+          <thead>
+            <tr>
+              <th v-for="index in 4" :key="`tech-h-${index}`">{{ index }}번</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td v-for="index in 4" :key="`tech-${index}`">
+                <input
+                  :value="boardView.techniques[index - 1]"
+                  type="number"
+                  min="1"
+                  max="200"
+                  :aria-label="`기술 ${index}번 레벨`"
+                  @change="setBoardLevel('techniques', index - 1, $event.target.value)"
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <i class="level-split"></i>
+        <table>
+          <thead>
+            <tr>
+              <th v-for="index in 4" :key="`charm-h-${index}`">{{ index }}번</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td v-for="index in 4" :key="`charm-${index}`">
+                <input
+                  :value="boardView.charms[index - 1]"
+                  type="number"
+                  min="1"
+                  max="200"
+                  :aria-label="`특성 ${index}번 레벨`"
+                  @change="setBoardLevel('charms', index - 1, $event.target.value)"
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
         <div v-for="group in groups" :key="group.id" class="tier-block">
-          <h3>{{ group.label }} · {{ group.rows.length }}개</h3>
-          <div class="skill-grid">
+          <button type="button" class="tier-fold" :aria-expanded="groupOpen(group.id)" @click="toggleGroup(group.id)">
+            <span>{{ group.label }} · {{ group.rows.length }}개</span>
+            <i :class="{ shut: !groupOpen(group.id) }"></i>
+          </button>
+          <div v-show="groupOpen(group.id)" class="skill-grid">
             <article
               v-for="row in group.rows"
               :key="row.skill.id"
@@ -785,17 +893,9 @@ async function dropProfile(id) {
             >
               <div class="meta" @click.stop>
                 <span>{{ row.skill.kind === "Technique" ? "기술" : "특성" }}</span>
-                <select :value="profile.ranks[row.skill.id] || profile.rank" :aria-label="`${row.skill.name} 티어`" @change="setRank(row.skill.id, $event.target.value)">
+                <select :value="profile.ranks[row.skill.id] || BASIS_RANK" :aria-label="`${row.skill.name} 등급`" @change="setRank(row.skill.id, $event.target.value)">
                   <option v-for="rank in 34" :key="rank" :value="rank">{{ rankLabel(rank) }}</option>
                 </select>
-                <input
-                  :value="profile.skillLevels[row.skill.id] || profile.skillLevel"
-                  type="number"
-                  min="1"
-                  max="200"
-                  :aria-label="`${row.skill.name} 레벨`"
-                  @change="setSkillLevel(row.skill.id, $event.target.value)"
-                />
               </div>
               <div class="skill-name">
                 <img :src="row.skill.icon" :alt="row.skill.name" width="36" height="36" />
