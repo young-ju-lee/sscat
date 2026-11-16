@@ -1,5 +1,6 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { getPool, mapDbError } from "./db.js";
 import { BOARD_ROLES, parsePower } from "./roster.js";
 
@@ -53,17 +54,23 @@ function readCookie(req, name) {
   return "";
 }
 
-function sessionCookie(id, expiresAt) {
+function cookieBase(req) {
+  const host = String(req?.headers?.host || "");
+  const local = host.startsWith("localhost") || host.startsWith("127.0.0.1");
+  return `HttpOnly; Path=/; SameSite=Lax${local ? "" : "; Secure"}`;
+}
+
+function sessionCookie(id, expiresAt, req) {
   const maxAge = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
-  return `sxs_session=${id}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}`;
+  return `sxs_session=${id}; ${cookieBase(req)}; Max-Age=${maxAge}`;
 }
 
-function clearCookie() {
-  return "sxs_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0";
+function clearCookie(req) {
+  return `sxs_session=; ${cookieBase(req)}; Max-Age=0`;
 }
 
-function boardCookie(id) {
-  return `sxs_board=${id}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${60 * 60 * 24 * 180}`;
+function boardCookie(id, req) {
+  return `sxs_board=${id}; ${cookieBase(req)}; Max-Age=${60 * 60 * 24 * 180}`;
 }
 
 function boardId(req) {
@@ -237,7 +244,7 @@ function openBoard(req) {
   const existing = boardId(req);
   if (existing) return { id: existing, cookie: "" };
   const id = randomUUID();
-  return { id, cookie: boardCookie(id) };
+  return { id, cookie: boardCookie(id, req) };
 }
 
 function httpError(status, message) {
@@ -508,13 +515,13 @@ async function handle(req, res) {
 
   if (method === "POST" && path === "/api/auth/register") {
     const result = await register(await readBody(req));
-    send(res, 200, { user: publicUser(result.user) }, { "Set-Cookie": sessionCookie(result.session.id, result.session.expires_at) });
+    send(res, 200, { user: publicUser(result.user) }, { "Set-Cookie": sessionCookie(result.session.id, result.session.expires_at, req) });
     return;
   }
 
   if (method === "POST" && path === "/api/auth/login") {
     const result = await login(await readBody(req));
-    send(res, 200, { user: publicUser(result.user) }, { "Set-Cookie": sessionCookie(result.session.id, result.session.expires_at) });
+    send(res, 200, { user: publicUser(result.user) }, { "Set-Cookie": sessionCookie(result.session.id, result.session.expires_at, req) });
     return;
   }
 
@@ -524,7 +531,7 @@ async function handle(req, res) {
     if (user && UUID.test(sessionId)) {
       await query("DELETE FROM sessions WHERE id = $1 AND user_id = $2", [sessionId, user.id]);
     }
-    send(res, 200, { ok: true }, { "Set-Cookie": clearCookie() });
+    send(res, 200, { ok: true }, { "Set-Cookie": clearCookie(req) });
     return;
   }
 
@@ -580,12 +587,15 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(port, "127.0.0.1", () => {
-  if (!process.env.DATABASE_URL) {
-    console.warn("DATABASE_URL이 없습니다. Supabase Connect에서 URI를 복사해 Back-end/.env에 넣어 주세요.");
-  }
-  console.log(`api listening on ${port}`);
-});
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
+if (isDirectRun) {
+  server.listen(port, "127.0.0.1", () => {
+    if (!process.env.DATABASE_URL) {
+      console.warn("DATABASE_URL이 없습니다. Supabase Connect에서 URI를 복사해 Back-end/.env에 넣어 주세요.");
+    }
+    console.log(`api listening on ${port}`);
+  });
+}
 
-export { server }
+export { server };

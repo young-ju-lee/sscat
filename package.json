@@ -1,0 +1,10 @@
+{
+  "name": "sscat",
+  "private": true,
+  "scripts": {
+    "build": "npm ci --prefix Front-end && npm run build --prefix Front-end && npm ci --prefix Back-end"
+  },
+  "devDependencies": {
+    "wrangler": "^4.45.0"
+  }
+}
