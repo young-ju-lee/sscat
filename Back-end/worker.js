@@ -1,8 +1,12 @@
-import { env } from "cloudflare:workers";
 import { httpServerHandler } from "cloudflare:node";
-
-if (env.DATABASE_URL) process.env.DATABASE_URL = env.DATABASE_URL;
+import { setDatabaseUrl } from "./server/db.js";
 
 const { server } = await import("./server/index.js");
+const handler = httpServerHandler(server);
 
-export default httpServerHandler(server);
+export default {
+  async fetch(request, env, ctx) {
+    setDatabaseUrl(env.DATABASE_URL);
+    return handler.fetch(request, env, ctx);
+  },
+};

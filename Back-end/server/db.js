@@ -3,15 +3,26 @@ import pg from "pg";
 const { Pool } = pg;
 
 let pool;
+let databaseUrl = "";
+
+export function setDatabaseUrl(value) {
+  const next = String(value || "").trim();
+  if (!next || next === databaseUrl) return;
+  databaseUrl = next;
+  if (pool) {
+    pool.end().catch(() => {});
+    pool = undefined;
+  }
+}
 
 function connectionString() {
-  return process.env.DATABASE_URL || "";
+  return databaseUrl || String(process.env.DATABASE_URL || "").trim();
 }
 
 export function getPool() {
   const connection = connectionString();
   if (!connection) {
-    const error = new Error("DB 연결이 없습니다. Supabase의 Connect에서 URI를 복사해 Back-end/.env의 DATABASE_URL에 넣어 주세요.");
+    const error = new Error("DB 연결이 없습니다. sscat-api 비밀값 DATABASE_URL이 필요합니다.");
     error.status = 503;
     throw error;
   }
